@@ -268,9 +268,11 @@ npm run build -w @soroban-lens/api
 
 ## Security
 
-v0.1 is **read-only and unauthenticated**, with `Access-Control-Allow-Origin: *`
-by default. It assumes a trusted network. Put a reverse proxy in front and set
-`LENS_CORS_ORIGIN` before exposing it.
+The API is **read-only**. By default it is unauthenticated and unlimited, with
+`Access-Control-Allow-Origin: *`, which suits localhost. Before exposing it, set
+`LENS_API_KEYS` to require an API key and `LENS_RATE_LIMIT_RPS` to rate limit
+each client IP (see [packages/api](./packages/api/README.md)), and set
+`LENS_CORS_ORIGIN`.
 
 ## License
 

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiRequestError, configuredNetworks } from './api.js';
+import { api, ApiRequestError, buildStreamPath, configuredNetworks } from './api.js';
 import type { Health, LensEvent, TopicCount } from './types.js';
 import { Filters, type FilterState } from './components/Filters.js';
 import { EventTable } from './components/EventTable.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
-import { usePersistentState, usePolling, useDebounced } from './hooks.js';
+import { usePersistentState, usePolling, useDebounced, useEventStream } from './hooks.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
 const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'; // XLM SAC
@@ -93,20 +93,49 @@ export function App(): React.JSX.Element {
     }
   }, [selected.baseUrl, query, nextCursor, loadingMore]);
 
-  // Reset the page whenever the query or the network changes.
+  // When the query or network changes, fetch fresh data but keep the old rows
+  // on screen until the new ones arrive.
   useEffect(() => {
+    if (!contractIdValid) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
-    setEvents([]);
     setNextCursor(null);
     void loadFirstPage();
-  }, [loadFirstPage]);
+  }, [loadFirstPage, contractIdValid]);
+
+  // Live updates arrive over SSE; polling is the fallback for whenever the
+  // stream is not open (before it connects, while the browser retries a drop,
+  // or against an API that does not offer it).
+  const streamUrl =
+    filters.live && contractIdValid ? `${selected.baseUrl}${buildStreamPath(query)}` : null;
+  const streaming = useEventStream(
+    streamUrl,
+    (data) => {
+      try {
+        const event = JSON.parse(data) as LensEvent;
+        setEvents((current) =>
+          current.some((e) => e.id === event.id) ? current : [event, ...current],
+        );
+        setTotal((current) => current + 1);
+        setLastUpdated(Date.now());
+      } catch {
+        // A malformed message is skipped; the next poll or reconnect resyncs.
+      }
+    },
+    // A stream only carries events from now on, so catch up on connect.
+    () => {
+      void loadFirstPage();
+    },
+  );
 
   usePolling(
     () => {
       void loadFirstPage();
     },
     LIVE_INTERVAL_MS,
-    filters.live,
+    filters.live && !streaming,
   );
 
   useEffect(() => {
@@ -224,7 +253,12 @@ export function App(): React.JSX.Element {
             {query.contractId ? ' for this contract' : ' indexed'}
             {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
           </span>
-          {filters.live && <span className="live-dot" title="Polling every 5 seconds">live</span>}
+          {filters.live && <span
+              className="live-dot"
+              title={streaming ? 'Streaming live updates' : 'Polling every 5 seconds'}
+            >
+              live
+            </span>}
         </div>
         {events.length > 0 && (
           <div className="export-actions">

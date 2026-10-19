@@ -22,5 +22,5 @@
   "dependencies": { "@stellar/stellar-sdk": "^17.2.1" },
   "peerDependencies": { "pg": "^8.13.0" },
   "peerDependenciesMeta": { "pg": { "optional": true } },
-  "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.4" }
+  "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.5" }
 }

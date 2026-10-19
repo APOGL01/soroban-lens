@@ -320,32 +320,81 @@ export class PostgresEventStore implements EventStore {
   async queryEvents(query: EventQuery): Promise<EventPage> {
     const limit = normaliseLimit(query.limit);
     const order = query.order === 'asc' ? 'ASC' : 'DESC';
+    const backward = query.direction === 'backward';
     const where = buildWhere(query);
-    const { total, isEstimate } = await this.#countCached(where);
+    const { total, isEstimate } = query.skipTotal
+      ? { total: 0, isEstimate: false }
+      : await this.#countCached(where);
 
     // Keyset pagination on the event id, which `COLLATE "C"` makes sort
-    // chronologically — see postgres-schema.ts.
+    // chronologically — see postgres-schema.ts. Same semantics as the SQLite
+    // store: paging backward scans against `order` and flips the rows back.
+    const afterOp = order === 'DESC' ? '<' : '>';
+    const beforeOp = order === 'DESC' ? '>' : '<';
+    const scanOrder = backward ? (order === 'DESC' ? 'ASC' : 'DESC') : order;
     const values: unknown[] = [...where.values];
     let keyset = '';
     if (query.cursor) {
       values.push(query.cursor);
-      keyset = `${where.clause ? 'AND' : 'WHERE'} id ${order === 'DESC' ? '<' : '>'} $${values.length}`;
+      keyset = `${where.clause ? 'AND' : 'WHERE'} id ${backward ? beforeOp : afterOp} $${values.length}`;
     }
     values.push(limit + 1);
     const { rows } = await this.#pool.query(
-      `SELECT * FROM events ${where.clause} ${keyset} ORDER BY id ${order} LIMIT $${values.length}`,
+      `SELECT * FROM events ${where.clause} ${keyset} ORDER BY id ${scanOrder} LIMIT $${values.length}`,
       values,
     );
 
     const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
+    const scanned = hasMore ? rows.slice(0, limit) : rows;
+    const page = backward ? scanned.reverse() : scanned;
+    const first = page[0] ? String(page[0]['id']) : undefined;
+    const lastRow = page.at(-1);
+    const last = lastRow ? String(lastRow['id']) : undefined;
+
+    const nextCursor = backward
+      ? last !== undefined && (await this.#existsBeyond(where, afterOp, last))
+        ? last
+        : null
+      : hasMore
+        ? (last ?? null)
+        : null;
+    const prevCursor = backward
+      ? hasMore
+        ? (first ?? null)
+        : null
+      : first !== undefined && (await this.#existsBeyond(where, beforeOp, first))
+        ? first
+        : null;
+
     return {
       events: page.map(rowToEvent),
-      nextCursor: hasMore ? (String(page.at(-1)?.['id'] ?? '') || null) : null,
+      nextCursor,
+      prevCursor,
       total,
       ...(isEstimate ? { totalIsEstimate: true as const } : {}),
     };
   }
+
+  /** Is there any matching row past `id` in the direction of `op`? */
+  async #existsBeyond(
+    where: { clause: string; values: unknown[] },
+    op: '<' | '>',
+    id: string,
+  ): Promise<boolean> {
+    const values = [...where.values, id];
+    const { rows } = await this.#pool.query(
+      `SELECT 1 FROM events ${where.clause} ${where.clause ? 'AND' : 'WHERE'} id ${op} $${values.length} LIMIT 1`,
+      values,
+    );
+    return rows.length > 0;
+  }
+
+  async getLatestEventId(): Promise<string | null> {
+    const { rows } = await this.#pool.query('SELECT MAX(id) AS id FROM events');
+    const id = rows[0]?.['id'];
+    return id === null || id === undefined ? null : String(id);
+  }
+
 
   async #countCached(where: { clause: string; values: unknown[] }): Promise<{ total: number; isEstimate: boolean }> {
     const key = `${where.clause}\u0000${JSON.stringify(where.values)}`;

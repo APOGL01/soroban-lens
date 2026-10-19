@@ -256,7 +256,7 @@ test('an empty database still answers rather than erroring', async () => {
     assert.equal(health.res.status, 200);
     assert.equal(health.body.events, 0);
     const events = await get('/events');
-    assert.deepEqual(events.body, { events: [], nextCursor: null, total: 0 });
+    assert.deepEqual(events.body, { events: [], nextCursor: null, prevCursor: null, total: 0 });
   }, { seed: false });
 });
 
@@ -826,7 +826,8 @@ test('a large page is compressed when the client advertises gzip support', async
   await withServer(async ({ base }) => {
     const compressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'gzip' } });
     assert.equal(compressed.headers.get('content-encoding'), 'gzip');
-    assert.equal(compressed.headers.get('vary'), 'Accept-Encoding');
+    // Accept as well: the event lists negotiate JSON versus CSV on it (#41).
+    assert.equal(compressed.headers.get('vary'), 'Accept, Accept-Encoding');
 
     const uncompressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'identity' } });
     assert.equal(uncompressed.headers.get('content-encoding'), null);
@@ -1294,5 +1295,485 @@ describe('CSV export', () => {
       assert.equal(res.headers.get('content-encoding'), 'gzip');
       assert.equal(asObjects(parseCsv(await res.text())).length, fixture.events.length);
     });
+  });
+});
+
+// ── helpers for the access-control, caching and streaming tests below ────────
+
+/** Like withServer, but lets a test configure the server and the seed. */
+async function withConfiguredServer({ options = {}, seed = fixture.events } = {}, run) {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  if (seed.length > 0) await store.insertEvents(seed);
+  const server = createApiServer({ store, ...options });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await run({ base, store });
+  } finally {
+    server.close();
+    await once(server, 'close');
+    await store.close();
+  }
+}
+
+const eventsByIdAscending = [...fixture.events].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+/** Read an SSE response until `count` messages have arrived, then hang up. */
+async function readSse(res, count, timeoutMs = 5000) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const messages = [];
+  let buffer = '';
+  const deadline = Date.now() + timeoutMs;
+  while (messages.length < count) {
+    if (Date.now() > deadline) throw new Error(`timed out with ${messages.length}/${count} messages: ${buffer}`);
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let end;
+    while ((end = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      const id = /^id: (.*)$/m.exec(block)?.[1];
+      const data = /^data: (.*)$/m.exec(block)?.[1];
+      if (id !== undefined && data !== undefined) messages.push({ id, event: JSON.parse(data) });
+    }
+  }
+  await reader.cancel();
+  return messages;
+}
+
+// ── #48 prevCursor ───────────────────────────────────────────────────────────
+
+test('paging forward then back over HTTP returns the original page exactly', async () => {
+  await withServer(async ({ get }) => {
+    const first = await get('/events?limit=8');
+    assert.equal(first.body.prevCursor, null, 'the first page has no previous page');
+
+    const second = await get(`/events?limit=8&cursor=${encodeURIComponent(first.body.nextCursor)}`);
+    assert.notEqual(second.body.prevCursor, null);
+
+    const back = await get(
+      `/events?limit=8&direction=backward&cursor=${encodeURIComponent(second.body.prevCursor)}`,
+    );
+    assert.deepEqual(back.body.events.map((e) => e.id), first.body.events.map((e) => e.id));
+    assert.equal(back.body.prevCursor, null);
+    assert.notEqual(back.body.nextCursor, null);
+  });
+});
+
+test('paging both directions across a whole contract walks the same pages each way', async () => {
+  await withServer(async ({ get }) => {
+    const pages = [];
+    let path = `/contracts/${SAC}/events?limit=5&order=asc`;
+    for (let guard = 0; guard < 100; guard++) {
+      const { body } = await get(path);
+      pages.push(body);
+      if (!body.nextCursor) break;
+      path = `/contracts/${SAC}/events?limit=5&order=asc&cursor=${encodeURIComponent(body.nextCursor)}`;
+    }
+    assert.ok(pages.length > 2);
+
+    let current = pages.at(-1);
+    for (let i = pages.length - 1; i > 0; i--) {
+      const { body } = await get(
+        `/contracts/${SAC}/events?limit=5&order=asc&direction=backward&cursor=${encodeURIComponent(current.prevCursor)}`,
+      );
+      assert.deepEqual(body.events.map((e) => e.id), pages[i - 1].events.map((e) => e.id));
+      current = body;
+    }
+    assert.equal(current.prevCursor, null);
+  });
+});
+
+test('direction must be forward or backward', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events?direction=sideways');
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'direction');
+  });
+});
+
+// ── #47 ETag and conditional requests ────────────────────────────────────────
+
+test('list responses carry an ETag, and an unchanged poll gets 304 with no body', async () => {
+  await withConfiguredServer({}, async ({ base }) => {
+    const first = await fetch(`${base}/events?limit=10`);
+    const etag = first.headers.get('etag');
+    assert.match(etag, /^W\/"/);
+    assert.equal(first.headers.get('cache-control'), 'no-cache');
+    await first.text();
+
+    const again = await fetch(`${base}/events?limit=10`, { headers: { 'If-None-Match': etag } });
+    assert.equal(again.status, 304);
+    assert.equal(again.headers.get('etag'), etag);
+    assert.equal(await again.text(), '');
+    assert.equal(again.headers.get('content-length'), null);
+  });
+});
+
+test('If-None-Match honours lists, strong forms and *', async () => {
+  await withConfiguredServer({}, async ({ base }) => {
+    const etag = (await fetch(`${base}/events`)).headers.get('etag');
+    const strong = etag.replace(/^W\//, '');
+    for (const header of [`"other", ${etag}`, strong, '*']) {
+      const res = await fetch(`${base}/events`, { headers: { 'If-None-Match': header } });
+      assert.equal(res.status, 304, header);
+    }
+    const stale = await fetch(`${base}/events`, { headers: { 'If-None-Match': 'W/"stale"' } });
+    assert.equal(stale.status, 200);
+  });
+});
+
+test('the ETag depends on the filter, and on the order of positional topic parameters', async () => {
+  await withConfiguredServer({}, async ({ base }) => {
+    const tag = async (path) => (await fetch(`${base}${path}`)).headers.get('etag');
+    const all = await tag('/events?limit=10');
+    assert.notEqual(all, await tag('/events?limit=11'));
+    assert.notEqual(all, await tag(`/contracts/${SAC}/events?limit=10`));
+    assert.equal(await tag('/events?limit=10&order=asc'), await tag('/events?order=asc&limit=10'));
+    assert.notEqual(await tag('/events?topic=a&topic=b'), await tag('/events?topic=b&topic=a'));
+  });
+});
+
+test('a newly indexed event changes the ETag, so the next poll is a full 200', async () => {
+  const seed = eventsByIdAscending.slice(0, -1);
+  await withConfiguredServer({ seed }, async ({ base, store }) => {
+    const etag = (await fetch(`${base}/events`)).headers.get('etag');
+    assert.equal((await fetch(`${base}/events`, { headers: { 'If-None-Match': etag } })).status, 304);
+
+    await store.insertEvents([eventsByIdAscending.at(-1)]);
+
+    const after = await fetch(`${base}/events`, { headers: { 'If-None-Match': etag } });
+    assert.equal(after.status, 200);
+    assert.notEqual(after.headers.get('etag'), etag);
+    assert.equal((await after.json()).events[0].id, eventsByIdAscending.at(-1).id);
+  });
+});
+
+test('HEAD and error responses behave: HEAD gets the ETag, a 400 does not', async () => {
+  await withConfiguredServer({}, async ({ base }) => {
+    const head = await fetch(`${base}/events`, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.match(head.headers.get('etag'), /^W\//);
+
+    const bad = await fetch(`${base}/events?limit=0`);
+    assert.equal(bad.status, 400);
+    assert.equal(bad.headers.get('etag'), null);
+    assert.equal(bad.headers.get('cache-control'), 'no-store');
+  });
+});
+
+test('non-list routes are unchanged: no ETag, still no-store', async () => {
+  await withConfiguredServer({}, async ({ base }) => {
+    const res = await fetch(`${base}/stats`);
+    assert.equal(res.headers.get('etag'), null);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+  });
+});
+
+// ── #43 rate limiting and API keys ───────────────────────────────────────────
+
+test('an unconfigured instance has no limit and needs no key', async () => {
+  await withConfiguredServer({}, async ({ base }) => {
+    for (let i = 0; i < 60; i++) {
+      const res = await fetch(`${base}/stats`);
+      assert.equal(res.status, 200);
+      await res.text();
+    }
+    assert.equal((await fetch(`${base}/events`, { method: 'OPTIONS' })).status, 204);
+  });
+});
+
+test('the rate limiter answers 429 with Retry-After once the bucket is empty', async () => {
+  await withConfiguredServer({ options: { rateLimit: { requestsPerSecond: 0.5, burst: 3 } } }, async ({ base }) => {
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${base}/stats`);
+      assert.equal(res.status, 200, `request ${i + 1} is within the burst`);
+      await res.text();
+    }
+    const limited = await fetch(`${base}/stats`);
+    assert.equal(limited.status, 429);
+    assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+    const body = await limited.json();
+    assert.equal(body.error.code, 'rate_limited');
+  });
+});
+
+test('a load of concurrent requests is held to the burst', async () => {
+  await withConfiguredServer({ options: { rateLimit: { requestsPerSecond: 0.1, burst: 10 } } }, async ({ base }) => {
+    const statuses = await Promise.all(
+      Array.from({ length: 50 }, async () => {
+        const res = await fetch(`${base}/stats`);
+        await res.text();
+        return res.status;
+      }),
+    );
+    assert.equal(statuses.filter((s) => s === 200).length, 10);
+    assert.equal(statuses.filter((s) => s === 429).length, 40);
+  });
+});
+
+test('health, the spec and the docs are never rate limited', async () => {
+  await withConfiguredServer({ options: { rateLimit: { requestsPerSecond: 0.1, burst: 1 } } }, async ({ base }) => {
+    await (await fetch(`${base}/stats`)).text(); // spends the only token
+    for (const path of ['/health', '/openapi.json', '/docs']) {
+      for (let i = 0; i < 5; i++) {
+        const res = await fetch(`${base}${path}`);
+        assert.equal(res.status, 200, path);
+        await res.text();
+      }
+    }
+    assert.equal((await fetch(`${base}/stats`)).status, 429);
+  });
+});
+
+test('X-Forwarded-For only keys the limiter when trustProxy is set', async () => {
+  const hit = (base, ip) => fetch(`${base}/stats`, { headers: { 'X-Forwarded-For': ip } }).then(async (r) => (await r.text(), r.status));
+
+  await withConfiguredServer({ options: { rateLimit: { requestsPerSecond: 0.1, burst: 1 } } }, async ({ base }) => {
+    assert.equal(await hit(base, '1.1.1.1'), 200);
+    assert.equal(await hit(base, '2.2.2.2'), 429, 'a spoofed header must not mint a fresh bucket');
+  });
+  await withConfiguredServer(
+    { options: { rateLimit: { requestsPerSecond: 0.1, burst: 1 }, trustProxy: true } },
+    async ({ base }) => {
+      assert.equal(await hit(base, '1.1.1.1'), 200);
+      assert.equal(await hit(base, '2.2.2.2'), 200);
+      assert.equal(await hit(base, '1.1.1.1'), 429);
+    },
+  );
+});
+
+test('API keys gate every data route when configured', async () => {
+  await withConfiguredServer({ options: { apiKeys: ['secret-one', 'secret-two'] } }, async ({ base }) => {
+    const missing = await fetch(`${base}/events`);
+    assert.equal(missing.status, 401);
+    assert.match(missing.headers.get('www-authenticate'), /^Bearer/);
+    assert.equal((await missing.json()).error.code, 'unauthorized');
+
+    assert.equal((await fetch(`${base}/events`, { headers: { 'X-API-Key': 'wrong' } })).status, 401);
+    assert.equal((await fetch(`${base}/events`, { headers: { 'X-API-Key': 'secret-two' } })).status, 200);
+    assert.equal((await fetch(`${base}/stats`, { headers: { Authorization: 'Bearer secret-one' } })).status, 200);
+    assert.equal((await fetch(`${base}/stats`, { headers: { Authorization: 'Basic secret-one' } })).status, 401);
+    assert.equal((await fetch(`${base}/no-such-route`)).status, 401, 'an unknown route does not reveal itself');
+  });
+});
+
+test('keys do not gate health, the spec, the docs or CORS preflight', async () => {
+  await withConfiguredServer({ options: { apiKeys: ['secret'] } }, async ({ base }) => {
+    for (const path of ['/health', '/openapi.json', '/docs']) {
+      const res = await fetch(`${base}${path}`);
+      assert.equal(res.status, 200, path);
+      await res.text();
+    }
+    const preflight = await fetch(`${base}/events`, { method: 'OPTIONS' });
+    assert.equal(preflight.status, 204);
+    assert.match(preflight.headers.get('access-control-allow-headers'), /X-API-Key/);
+  });
+});
+
+test('the limiter runs before the key check, so key guessing is throttled', async () => {
+  await withConfiguredServer(
+    { options: { apiKeys: ['secret'], rateLimit: { requestsPerSecond: 0.1, burst: 2 } } },
+    async ({ base }) => {
+      assert.equal((await fetch(`${base}/events`, { headers: { 'X-API-Key': 'a' } })).status, 401);
+      assert.equal((await fetch(`${base}/events`, { headers: { 'X-API-Key': 'b' } })).status, 401);
+      assert.equal((await fetch(`${base}/events`, { headers: { 'X-API-Key': 'secret' } })).status, 429);
+    },
+  );
+});
+
+test('the served OpenAPI document declares the security scheme and the 401/429 responses', async () => {
+  await withServer(async ({ get }) => {
+    const { body } = await get('/openapi.json');
+    assert.ok(body.components.securitySchemes.ApiKeyAuth, 'ApiKeyAuth scheme');
+    assert.ok(body.components.securitySchemes.BearerAuth, 'BearerAuth scheme');
+    assert.ok(body.components.responses.Unauthorized);
+    assert.ok(body.components.responses.TooManyRequests);
+    assert.ok(Array.isArray(body.security), 'a document-level security requirement');
+    assert.deepEqual(body.paths['/health'].get.security, [], '/health is public');
+  });
+});
+
+// ── #42 server-sent events ───────────────────────────────────────────────────
+
+test('GET /events/stream emits each newly indexed event with its id', async () => {
+  const seed = eventsByIdAscending.slice(0, -3);
+  const incoming = eventsByIdAscending.slice(-3);
+  await withConfiguredServer({ seed, options: { stream: { pollIntervalMs: 20 } } }, async ({ base, store }) => {
+    const res = await fetch(`${base}/events/stream`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /^text\/event-stream/);
+    assert.equal(res.headers.get('cache-control'), 'no-cache');
+
+    await store.insertEvents(incoming);
+
+    const messages = await readSse(res, incoming.length);
+    assert.deepEqual(messages.map((m) => m.id), incoming.map((e) => e.id));
+    assert.deepEqual(messages.map((m) => m.event.id), incoming.map((e) => e.id));
+  });
+});
+
+test('the stream carries only new events: nothing already indexed is replayed', async () => {
+  const seed = eventsByIdAscending.slice(0, -1);
+  const incoming = eventsByIdAscending.at(-1);
+  await withConfiguredServer({ seed, options: { stream: { pollIntervalMs: 20 } } }, async ({ base, store }) => {
+    const res = await fetch(`${base}/events/stream`);
+    await store.insertEvents([incoming]);
+    const [only] = await readSse(res, 1);
+    assert.equal(only.id, incoming.id);
+  });
+});
+
+test('Last-Event-ID resumes from just after that event, in order', async () => {
+  await withConfiguredServer({ options: { stream: { pollIntervalMs: 20 } } }, async ({ base }) => {
+    const resumeAfter = eventsByIdAscending.at(-4);
+    const res = await fetch(`${base}/events/stream`, { headers: { 'Last-Event-ID': resumeAfter.id } });
+    const messages = await readSse(res, 3);
+    assert.deepEqual(messages.map((m) => m.id), eventsByIdAscending.slice(-3).map((e) => e.id));
+  });
+});
+
+test('?lastEventId= resumes the same way, for clients that cannot set headers', async () => {
+  await withConfiguredServer({ options: { stream: { pollIntervalMs: 20 } } }, async ({ base }) => {
+    const resumeAfter = eventsByIdAscending.at(-3);
+    const res = await fetch(`${base}/events/stream?lastEventId=${encodeURIComponent(resumeAfter.id)}`);
+    const messages = await readSse(res, 2);
+    assert.deepEqual(messages.map((m) => m.id), eventsByIdAscending.slice(-2).map((e) => e.id));
+  });
+});
+
+test('the stream applies the same filters as /events', async () => {
+  await withConfiguredServer({ options: { stream: { pollIntervalMs: 20 } } }, async ({ base }) => {
+    const sample = eventsByIdAscending.at(-1);
+    const res = await fetch(
+      `${base}/events/stream?contractId=${sample.contractId}&lastEventId=${encodeURIComponent(eventsByIdAscending[0].id)}`,
+    );
+    const expected = eventsByIdAscending.slice(1).filter((e) => e.contractId === sample.contractId);
+    const messages = await readSse(res, expected.length);
+    assert.ok(messages.every((m) => m.event.contractId === sample.contractId));
+    assert.deepEqual(messages.map((m) => m.id), expected.map((e) => e.id));
+  });
+});
+
+test('an invalid stream filter is a 400 before any stream opens', async () => {
+  await withServer(async ({ get }) => {
+    const { res, body } = await get('/events/stream?contractId=nope');
+    assert.equal(res.status, 400);
+    assert.equal(body.error.parameter, 'contractId');
+    assert.equal((await get('/events/stream?limit=0')).res.status, 400);
+  });
+});
+
+test('/events/stream is not mistaken for an event id', async () => {
+  await withConfiguredServer({}, async ({ base }) => {
+    const res = await fetch(`${base}/events/stream`, { method: 'HEAD' });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /^text\/event-stream/);
+  });
+});
+
+test('streams are subject to API keys', async () => {
+  await withConfiguredServer({ options: { apiKeys: ['secret'] } }, async ({ base }) => {
+    assert.equal((await fetch(`${base}/events/stream`)).status, 401);
+    const ok = await fetch(`${base}/events/stream`, { headers: { 'X-API-Key': 'secret' } });
+    assert.equal(ok.status, 200);
+    await ok.body.cancel();
+  });
+});
+
+test('more streams than maxStreams are refused with 503', async () => {
+  await withConfiguredServer({ options: { stream: { maxStreams: 2 } } }, async ({ base }) => {
+    const open = [await fetch(`${base}/events/stream`), await fetch(`${base}/events/stream`)];
+    const refused = await fetch(`${base}/events/stream`);
+    assert.equal(refused.status, 503);
+    assert.ok(refused.headers.get('retry-after'));
+    await refused.text();
+    for (const res of open) await res.body.cancel();
+  });
+});
+
+test('100 concurrent streams all receive a new event', async () => {
+  const seed = eventsByIdAscending.slice(0, -1);
+  const incoming = eventsByIdAscending.at(-1);
+  await withConfiguredServer({ seed, options: { stream: { pollIntervalMs: 20 } } }, async ({ base, store }) => {
+    const responses = await Promise.all(Array.from({ length: 100 }, () => fetch(`${base}/events/stream`)));
+    assert.ok(responses.every((r) => r.status === 200));
+
+    const before = process.memoryUsage().heapUsed;
+    await store.insertEvents([incoming]);
+    const received = await Promise.all(responses.map((r) => readSse(r, 1)));
+    assert.ok(received.every(([m]) => m.id === incoming.id));
+
+    // One shared poller, one id per stream: nothing is buffered per connection.
+    const grewBy = process.memoryUsage().heapUsed - before;
+    assert.ok(grewBy < 100 * 1024 * 1024, `heap grew by ${grewBy} bytes`);
+  });
+});
+
+test('closing the server ends open streams instead of hanging', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/events/stream`);
+  assert.equal(res.status, 200);
+
+  server.close();
+  await Promise.race([
+    once(server, 'close'),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('server.close() hung on an open stream')), 3000)),
+  ]);
+  await res.body.cancel().catch(() => {});
+  await store.close();
+});
+
+// ── token bucket, with a fake clock ──────────────────────────────────────────
+
+test('TokenBucketLimiter refills over time and forgets idle clients', async () => {
+  const { TokenBucketLimiter } = await import('../dist/index.js');
+  let now = 0;
+  const limiter = new TokenBucketLimiter({ requestsPerSecond: 2, burst: 2 }, () => now);
+
+  assert.deepEqual(limiter.take('a'), { allowed: true });
+  assert.deepEqual(limiter.take('a'), { allowed: true });
+  assert.deepEqual(limiter.take('a'), { allowed: false, retryAfterSeconds: 1 });
+
+  now += 500; // one token back at 2/s
+  assert.deepEqual(limiter.take('a'), { allowed: true });
+  assert.equal(limiter.take('a').allowed, false);
+  assert.equal(limiter.take('b').allowed, true, 'clients have separate buckets');
+
+  // Enough distinct clients to trigger a sweep, then let them all refill.
+  for (let i = 0; i < 2000; i++) limiter.take(`ip-${i}`);
+  now += 10_000;
+  for (let i = 0; i < 1024; i++) limiter.take('c');
+  assert.ok(limiter.size < 10, `idle buckets must be dropped, still tracking ${limiter.size}`);
+});
+
+test('TokenBucketLimiter rejects a nonsensical rate', async () => {
+  const { TokenBucketLimiter } = await import('../dist/index.js');
+  assert.throws(() => new TokenBucketLimiter({ requestsPerSecond: 0 }), /positive/);
+  assert.throws(() => new TokenBucketLimiter({ requestsPerSecond: 1, burst: 0 }), /at least 1/);
+});
+
+test('a JSON ETag never validates a CSV request for the same URL', async () => {
+  await withServer(async ({ base }) => {
+    const json = await fetch(`${base}/events`);
+    const etag = json.headers.get('etag');
+    assert.ok(etag, 'the JSON list carries an ETag');
+    await json.arrayBuffer();
+
+    const sameJson = await fetch(`${base}/events`, { headers: { 'If-None-Match': etag } });
+    assert.equal(sameJson.status, 304);
+
+    // Same URL, other representation: must not be answered with 304.
+    const csv = await fetch(`${base}/events`, { headers: { Accept: 'text/csv', 'If-None-Match': etag } });
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get('content-type'), /^text\/csv/);
+    await csv.text();
   });
 });
