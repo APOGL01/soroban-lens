@@ -114,6 +114,13 @@ npm run web          # explore it
   timing out — use a scripted fake, as `packages/ingest/test/poller.test.js`
   does.
 
+- **Opt-in suites stay out of `npm test`.** `npm run test:integration` runs
+  `packages/cli/integration/` against a real local node (Docker:
+  `docker compose -f docker-compose.integration.yml up -d`) and also runs in a
+  nightly CI job. The Postgres half of the store conformance suite runs when
+  `LENS_TEST_POSTGRES_URL` is set (`docker-compose.postgres.yml` does it for you).
+  The default suite needs neither, so the offline guarantee holds.
+
 If you change `fixtures/testnet-events.json`, re-run everything: several suites
 assert on specific event ids, and `fixtures/README.md` documents exactly which
 decoding cases the file is there to cover.

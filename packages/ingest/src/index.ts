@@ -20,6 +20,14 @@ export type { RpcClientOptions, GetEventsArgs } from './rpc-client.js';
 export { EventPoller, defaultCursorKey, ingestionLag, APPROX_LEDGER_SECONDS } from './poller.js';
 export type { PollerDeps, PollerProgress } from './poller.js';
 
+export {
+  measureClockSkew,
+  resolveClockSkewThreshold,
+  describeClockSkew,
+  DEFAULT_CLOCK_SKEW_THRESHOLD_SECONDS,
+} from './clock-skew.js';
+export type { ClockSkew } from './clock-skew.js';
+
 export { FileCursorStore, MemoryCursorStore } from './cursor.js';
 export type { CursorStore, CursorState } from './cursor.js';
 

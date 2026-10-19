@@ -236,16 +236,25 @@
             "$ref": "#/components/parameters/SuccessfulOnly"
           },
           {
+            "$ref": "#/components/parameters/Format"
+          },
+          {
             "$ref": "#/components/parameters/IfNoneMatch"
           }
         ],
         "responses": {
           "200": {
-            "description": "A page of events",
+            "description": "A page of events, or with `format=csv` / `Accept: text/csv` a CSV stream of every matching event",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EventPage"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "description": "RFC 4180 CSV, streamed (chunked transfer, no Content-Length). Header row: id, contractId, type, ledger, ledgerClosedAt, txHash, transactionIndex, operationIndex, inSuccessfulContractCall, topic0..topicN, valueType, value, decodeError."
                 }
               }
             },
@@ -517,12 +526,15 @@
             "$ref": "#/components/parameters/SuccessfulOnly"
           },
           {
+            "$ref": "#/components/parameters/Format"
+          },
+          {
             "$ref": "#/components/parameters/IfNoneMatch"
           }
         ],
         "responses": {
           "200": {
-            "description": "A page of events",
+            "description": "A page of events, or with `format=csv` / `Accept: text/csv` a CSV stream of every matching event",
             "content": {
               "application/json": {
                 "schema": {
@@ -534,6 +546,12 @@
                       "$ref": "#/components/schemas/EventBatch"
                     }
                   ]
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "description": "RFC 4180 CSV, streamed (chunked transfer, no Content-Length). Header row: id, contractId, type, ledger, ledgerClosedAt, txHash, transactionIndex, operationIndex, inSuccessfulContractCall, topic0..topicN, valueType, value, decodeError."
                 }
               }
             },
@@ -1053,7 +1071,7 @@
       "Limit": {
         "name": "limit",
         "in": "query",
-        "description": "Maximum rows to return.",
+        "description": "Maximum rows to return. In a CSV export this caps the total rows written; without it every matching event is exported.",
         "schema": {
           "type": "integer",
           "minimum": 1,
@@ -1216,6 +1234,19 @@
           "type": "string"
         },
         "example": "exposure"
+      },
+      "Format": {
+        "name": "format",
+        "in": "query",
+        "description": "Response format. `csv` is equivalent to sending `Accept: text/csv` and wins over it; `json` is the default. CSV streams every matching event (see `limit`), one row per event, with `topic0..topicN` columns and the decoded value as JSON text, so large integers (`i128` and friends) stay quoted and keep their precision. Text-like topics starting with `=`, `+`, `-` or `@` are prefixed with `'` so a spreadsheet does not run them as formulas.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "json",
+            "csv"
+          ],
+          "default": "json"
+        }
       },
       "Direction": {
         "name": "direction",

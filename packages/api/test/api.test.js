@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import { nativeToScVal } from '@stellar/stellar-sdk';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
 import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
 
@@ -825,7 +826,8 @@ test('a large page is compressed when the client advertises gzip support', async
   await withServer(async ({ base }) => {
     const compressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'gzip' } });
     assert.equal(compressed.headers.get('content-encoding'), 'gzip');
-    assert.equal(compressed.headers.get('vary'), 'Accept-Encoding');
+    // Accept as well: the event lists negotiate JSON versus CSV on it (#41).
+    assert.equal(compressed.headers.get('vary'), 'Accept, Accept-Encoding');
 
     const uncompressed = await fetch(`${base}/events?limit=1000`, { headers: { 'Accept-Encoding': 'identity' } });
     assert.equal(uncompressed.headers.get('content-encoding'), null);
@@ -1121,6 +1123,240 @@ test('a 405 on a multi-method route lists every method', async () => {
     const res = await fetch(`${base}/graphql`, { method: 'DELETE' });
     assert.equal(res.status, 405);
     assert.equal(res.headers.get('allow'), 'GET, HEAD, POST');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CSV export (#41)
+// ---------------------------------------------------------------------------
+
+/** Minimal RFC 4180 parser: quoted fields, doubled quotes, CRLF or LF rows. */
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\r' || c === '\n') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+const asObjects = (rows) => rows.slice(1).map((r) => Object.fromEntries(rows[0].map((h, i) => [h, r[i]])));
+
+const I128_MAX = '170141183460469231731687303715884105727';
+const I128_MIN = '-170141183460469231731687303715884105728';
+
+/** A decoded event with the given topics/value, valid XDR included so the store can index it. */
+function syntheticEvent(n, { topics, value, contractId = SAC } = {}) {
+  const scv = (d) => nativeToScVal(d.native, { type: d.type }).toXDR('base64');
+  const decoded = (d) => ({ type: d.type, value: d.value });
+  return {
+    id: `${String(n).padStart(19, '0')}-0000000000`,
+    contractId,
+    type: 'contract',
+    ledger: 1000 + n,
+    ledgerClosedAt: '2026-01-01T00:00:00Z',
+    txHash: 'ab'.repeat(32),
+    transactionIndex: 0,
+    operationIndex: 0,
+    inSuccessfulContractCall: true,
+    topics: topics.map(decoded),
+    topicsXdr: topics.map(scv),
+    value: decoded(value),
+    valueXdr: scv(value),
+    indexedAt: '2026-01-01T00:00:01Z',
+  };
+}
+
+const sym = (v) => ({ type: 'symbol', native: v, value: v });
+const i128 = (v) => ({ type: 'i128', native: BigInt(v), value: v });
+
+describe('CSV export', () => {
+  test('?format=csv streams one row per event, in the same order as the JSON list', async () => {
+    await withServer(async ({ base, get }) => {
+      const json = await get('/events?limit=1000');
+      const res = await fetch(`${base}/events?format=csv`);
+
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type'), /^text\/csv/);
+      assert.match(res.headers.get('content-disposition'), /attachment; filename="events\.csv"/);
+      assert.equal(res.headers.get('content-length'), null, 'a streamed body has no Content-Length');
+
+      const rows = asObjects(parseCsv(await res.text()));
+      assert.deepEqual(rows.map((r) => r.id), json.body.events.map((e) => e.id));
+    });
+  });
+
+  test('the header names the documented columns and one column per topic position', async () => {
+    await withServer(async ({ base }) => {
+      const [header] = parseCsv(await (await fetch(`${base}/events?format=csv`)).text());
+      assert.deepEqual(header.slice(0, 9), [
+        'id', 'contractId', 'type', 'ledger', 'ledgerClosedAt', 'txHash',
+        'transactionIndex', 'operationIndex', 'inSuccessfulContractCall',
+      ]);
+      assert.deepEqual(header.slice(9, 13), ['topic0', 'topic1', 'topic2', 'topic3']);
+      assert.deepEqual(header.slice(-3), ['valueType', 'value', 'decodeError']);
+    });
+  });
+
+  test('Accept: text/csv selects CSV; */* and a browser Accept stay JSON; ?format wins over Accept', async () => {
+    await withServer(async ({ base }) => {
+      const ct = async (path, accept) =>
+        (await fetch(base + path, { headers: accept ? { Accept: accept } : {} })).headers.get('content-type');
+
+      assert.match(await ct('/events', 'text/csv'), /^text\/csv/);
+      assert.match(await ct('/events', 'text/csv, application/json;q=0.5'), /^text\/csv/);
+      assert.match(await ct('/events', 'application/json;q=0.5, text/csv'), /^text\/csv/);
+      assert.match(await ct('/events', '*/*'), /^application\/json/);
+      assert.match(await ct('/events'), /^application\/json/);
+      assert.match(
+        await ct('/events', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'),
+        /^application\/json/,
+      );
+      assert.match(await ct('/events', 'text/csv;q=0.1, application/json'), /^application\/json/);
+      assert.match(await ct('/events?format=json', 'text/csv'), /^application\/json/);
+      assert.match(await ct('/events?format=csv', 'application/json'), /^text\/csv/);
+    });
+  });
+
+  test('an unknown ?format is a 400 JSON error, not a silent fallback', async () => {
+    await withServer(async ({ get }) => {
+      const { res, body } = await get('/events?format=xml');
+      assert.equal(res.status, 400);
+      assert.equal(body.error.parameter, 'format');
+    });
+  });
+
+  test('works on /contracts/{id}/events too, filtered, and names the file after the contract', async () => {
+    await withServer(async ({ base, get }) => {
+      const json = await get(`/contracts/${SAC}/events?limit=1000`);
+      const res = await fetch(`${base}/contracts/${SAC}/events?format=csv`);
+
+      assert.match(res.headers.get('content-disposition'), new RegExp(`filename="${SAC}-events\\.csv"`));
+      const rows = asObjects(parseCsv(await res.text()));
+      assert.equal(rows.length, json.body.events.length);
+      assert.ok(rows.every((r) => r.contractId === SAC));
+    });
+  });
+
+  test('filters apply to the export, and `limit` caps the total rows', async () => {
+    await withServer(async ({ base }) => {
+      const limited = asObjects(parseCsv(await (await fetch(`${base}/events?format=csv&limit=3`)).text()));
+      assert.equal(limited.length, 3);
+
+      const none = parseCsv(await (await fetch(`${base}/events?format=csv&txHash=${'f'.repeat(64)}`)).text());
+      assert.equal(none.length, 1, 'no matches: the header row alone');
+    });
+  });
+
+  test('the ?ids= batch lookup exports as CSV too', async () => {
+    await withServer(async ({ base }) => {
+      const ids = fixture.events.slice(0, 2).map((e) => e.id);
+      const rows = asObjects(parseCsv(await (await fetch(`${base}/events?format=csv&ids=${ids.join(',')}`)).text()));
+      assert.deepEqual(rows.map((r) => r.id), ids);
+    });
+  });
+
+  test('large integers survive a round trip: i128 topics and values are quoted and exact', async () => {
+    await withServer(async ({ base, store }) => {
+      await store.insertDecoded([
+        syntheticEvent(1, { topics: [sym('transfer'), i128(I128_MAX)], value: i128(I128_MIN) }),
+      ]);
+
+      const text = await (await fetch(`${base}/events?format=csv&txHash=${'ab'.repeat(32)}`)).text();
+      // The raw file carries the digits in full, never an exponent or a rounded float.
+      assert.ok(text.includes(I128_MAX));
+      assert.ok(text.includes(I128_MIN));
+
+      const [row] = asObjects(parseCsv(text));
+      assert.equal(row.topic0, 'transfer');
+      // The cell holds JSON text: a quoted string, which a spreadsheet leaves as text.
+      assert.equal(row.topic1, `"${I128_MAX}"`);
+      assert.equal(JSON.parse(row.topic1), I128_MAX);
+      assert.equal(JSON.parse(row.value), I128_MIN);
+      assert.equal(row.valueType, 'i128');
+      // And Number() would have destroyed it, which is the whole point.
+      assert.notEqual(String(Number(I128_MAX)), I128_MAX);
+    }, { seed: false });
+  });
+
+  test('the header is sized to the widest event, so every row has the same number of fields', async () => {
+    await withServer(async ({ base, store }) => {
+      await store.insertDecoded([
+        syntheticEvent(1, { topics: [sym('a')], value: sym('x') }),
+        syntheticEvent(2, { topics: [sym('a'), sym('b'), sym('c'), sym('d'), sym('e'), sym('f')], value: sym('y') }),
+      ]);
+
+      const rows = parseCsv(await (await fetch(`${base}/events?format=csv`)).text());
+      assert.ok(rows[0].includes('topic5'), 'a six-topic event needs topic0..topic5');
+      assert.ok(rows.every((r) => r.length === rows[0].length), 'no ragged rows');
+    }, { seed: false });
+  });
+
+  test('a text topic that looks like a spreadsheet formula is neutralised', async () => {
+    await withServer(async ({ base, store }) => {
+      await store.insertDecoded([
+        syntheticEvent(1, {
+          topics: [{ type: 'string', native: '=HYPERLINK("http://evil")', value: '=HYPERLINK("http://evil")' }],
+          value: sym('ok'),
+        }),
+      ]);
+      const [row] = asObjects(parseCsv(await (await fetch(`${base}/events?format=csv`)).text()));
+      assert.equal(row.topic0, `'=HYPERLINK("http://evil")`);
+    }, { seed: false });
+  });
+
+  test('an export larger than one internal page streams completely and once', async () => {
+    await withServer(async ({ base, store }) => {
+      const events = Array.from({ length: 1234 }, (_, i) => syntheticEvent(i + 1, { topics: [sym('t')], value: sym('v') }));
+      await store.insertDecoded(events);
+
+      const rows = asObjects(parseCsv(await (await fetch(`${base}/events?format=csv`)).text()));
+      assert.equal(rows.length, 1234);
+      assert.equal(new Set(rows.map((r) => r.id)).size, 1234, 'no event repeated across pages');
+
+      const asc = asObjects(parseCsv(await (await fetch(`${base}/events?format=csv&order=asc`)).text()));
+      assert.deepEqual(asc.map((r) => r.id), [...rows.map((r) => r.id)].reverse());
+    }, { seed: false });
+  });
+
+  test('HEAD returns the CSV headers without a body', async () => {
+    await withServer(async ({ base }) => {
+      const res = await fetch(`${base}/events?format=csv`, { method: 'HEAD' });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type'), /^text\/csv/);
+      assert.equal(await res.text(), '');
+    });
+  });
+
+  test('Vary names Accept, since the same URL can answer JSON or CSV', async () => {
+    await withServer(async ({ base }) => {
+      for (const path of ['/events', '/events?format=csv']) {
+        assert.match((await fetch(base + path)).headers.get('vary'), /\bAccept\b/);
+      }
+    });
+  });
+
+  test('a gzip-capable client receives a compressed CSV that decodes to the same rows', async () => {
+    await withServer(async ({ base }) => {
+      // fetch sends Accept-Encoding and transparently decodes, so asserting on
+      // the decoded rows proves the compressed stream was well-formed.
+      const res = await fetch(`${base}/events?format=csv`, { headers: { 'Accept-Encoding': 'gzip' } });
+      assert.equal(res.headers.get('content-encoding'), 'gzip');
+      assert.equal(asObjects(parseCsv(await res.text())).length, fixture.events.length);
+    });
   });
 });
 
@@ -1584,4 +1820,22 @@ test('TokenBucketLimiter rejects a nonsensical rate', async () => {
   const { TokenBucketLimiter } = await import('../dist/index.js');
   assert.throws(() => new TokenBucketLimiter({ requestsPerSecond: 0 }), /positive/);
   assert.throws(() => new TokenBucketLimiter({ requestsPerSecond: 1, burst: 0 }), /at least 1/);
+});
+
+test('a JSON ETag never validates a CSV request for the same URL', async () => {
+  await withServer(async ({ base }) => {
+    const json = await fetch(`${base}/events`);
+    const etag = json.headers.get('etag');
+    assert.ok(etag, 'the JSON list carries an ETag');
+    await json.arrayBuffer();
+
+    const sameJson = await fetch(`${base}/events`, { headers: { 'If-None-Match': etag } });
+    assert.equal(sameJson.status, 304);
+
+    // Same URL, other representation: must not be answered with 304.
+    const csv = await fetch(`${base}/events`, { headers: { Accept: 'text/csv', 'If-None-Match': etag } });
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get('content-type'), /^text\/csv/);
+    await csv.text();
+  });
 });

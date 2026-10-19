@@ -1,0 +1,18 @@
+# A local Stellar network for the opt-in integration suite (#20):
+#
+#   docker compose -f docker-compose.integration.yml up -d
+#   npm run test:integration
+#   docker compose -f docker-compose.integration.yml down -v
+#
+# stellar/quickstart --local runs core, Horizon, Soroban RPC and friendbot:
+#   RPC        http://localhost:8000/rpc
+#   Friendbot  http://localhost:8000/friendbot
+#
+# The suite waits for the node to report healthy, which takes about a minute on
+# a cold start, so there is no healthcheck to gate on here.
+services:
+  quickstart:
+    image: stellar/quickstart:latest
+    command: ["--local"]
+    ports:
+      - "8000:8000"

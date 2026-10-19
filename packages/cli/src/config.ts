@@ -1,4 +1,4 @@
-import { resolveNetwork, type NetworkConfig } from '@soroban-lens/ingest';
+import { resolveClockSkewThreshold, resolveNetwork, type NetworkConfig } from '@soroban-lens/ingest';
 
 /** Everything the CLI needs, resolved from flags then environment then defaults. */
 export interface LensConfig {
@@ -19,6 +19,11 @@ export interface LensConfig {
    * default; off for an air-gapped RPC proxy that only forwards getEvents.
    */
   fetchSpecs: boolean;
+  /**
+   * Local-versus-ledger clock difference, in seconds, beyond which `lens doctor`
+   * and the indexer's startup warn (#18). `LENS_CLOCK_SKEW_THRESHOLD_SECONDS`.
+   */
+  clockSkewThresholdSeconds: number;
 }
 
 export interface ConfigOverrides {
@@ -70,6 +75,7 @@ export function resolveConfig(
       maxDelayMs: overrides.retryMaxDelay ?? numberOr(env.LENS_RETRY_MAX_DELAY_MS, 30_000),
     },
     fetchSpecs: !/^(0|false|no|off)$/i.test((env.LENS_FETCH_SPECS ?? '').trim()),
+    clockSkewThresholdSeconds: resolveClockSkewThreshold(env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS),
   };
 }
 

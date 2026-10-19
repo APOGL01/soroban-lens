@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --test test/*.test.js",
+    "test:integration": "npm run build && node --test --test-timeout=300000 integration/*.integration.test.js"
   },
   "dependencies": {
     "@soroban-lens/ingest": "*",
