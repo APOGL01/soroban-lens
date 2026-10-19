@@ -206,6 +206,10 @@ body {
 .event-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
 
 .col-toggle { width: 26px; color: var(--muted); }
+.col-toggle button {
+  border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer;
+}
+.col-toggle button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .col-ledger { width: 130px; }
 .col-ledger .mono { display: block; }
 .col-contract { width: 160px; }

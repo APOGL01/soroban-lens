@@ -18,10 +18,17 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
     <>
       <tr
         className={`event-row${expanded ? ' is-expanded' : ''}${event.inSuccessfulContractCall ? '' : ' is-failed'}`}
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
       >
-        <td className="col-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</td>
+        <td className="col-toggle">
+          <button
+            type="button"
+            aria-label={expanded ? 'Collapse event details' : 'Expand event details'}
+            aria-expanded={expanded}
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? '▾' : '▸'}
+          </button>
+        </td>
         <td className="col-ledger">
           <span className="mono">{event.ledger}</span>
           <span className="muted small">{relativeTime(event.ledgerClosedAt)}</span>
@@ -36,10 +43,7 @@ export function EventRow({ event, showContract, onTopicClick }: Props): React.JS
             type="button"
             className="topic-chip"
             title={`Filter by "${topicLabel}"`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onTopicClick(topicLabel);
-            }}
+            onClick={() => onTopicClick(topicLabel)}
           >
             {topicLabel}
           </button>
