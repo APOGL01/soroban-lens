@@ -52,6 +52,11 @@ export interface EventPage {
   events: LensEvent[];
   nextCursor: string | null;
   total: number;
+  /**
+   * Present on an empty contract page when the contract is indexed but nothing
+   * matches the filters. An unindexed contract is a 404 instead.
+   */
+  emptyReason?: 'no_matching_events';
 }
 
 export interface ContractSummary {
