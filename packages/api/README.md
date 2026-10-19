@@ -23,11 +23,17 @@ curl "localhost:8080/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2
 | `GET /status` | Stats plus every ingest stream's saved cursor — indexer lag without asking the RPC. |
 | `GET /contracts` | Indexed contracts, most recently active first. |
 | `GET /contracts/{id}/events` | Events for one contract. |
+| `GET /contracts/{id}/activity` | Event counts per `minute`/`hour`/`day` bucket: `?bucket=hour&from=…&to=…`. Empty buckets are omitted. |
 | `GET /contracts/{id}/topics` | Distinct first-topic values, ranked by frequency. |
 | `GET /contracts/{id}/spec` | Where the contract's spec came from and which events it declares. `404` before any lookup. |
 | `GET /events` | Events across all contracts. |
 | `GET /events/{id}` | One event by RPC event id. |
 | `GET /openapi.json` | The spec below, served from disk. |
+
+Every event-returning route accepts `?fields=id,ledger,topics,value` to return only
+those event properties. Omitted, every property is returned. `topicsXdr` and
+`valueXdr` roughly double the payload, so leaving them out shrinks it. Unknown
+names are a `400`.
 
 Query parameters on the two event-list routes: `limit` (1–1000, default 50),
 `cursor`, `order` (`asc`/`desc`), `topic` (repeatable), `fromLedger`,
@@ -98,6 +104,12 @@ negotiation would be the moment to reconsider.
 | `--port`, `-p` | `LENS_API_PORT` | `8080` |
 | `--host` | `LENS_API_HOST` | `0.0.0.0` |
 | `--cors` | `LENS_CORS_ORIGIN` | `*` |
+| `--shutdown-timeout` | `LENS_SHUTDOWN_TIMEOUT_MS` | `10000` |
+
+On `SIGINT`/`SIGTERM` the API stops accepting connections, lets in-flight
+requests finish (telling keep-alive clients to reconnect via `Connection: close`),
+and only then closes the database. Requests still running after the shutdown
+timeout are dropped.
 
 ## Tests
 

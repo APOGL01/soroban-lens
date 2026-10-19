@@ -204,6 +204,9 @@
           },
           {
             "$ref": "#/components/parameters/SuccessfulOnly"
+          },
+          {
+            "$ref": "#/components/parameters/Fields"
           }
         ],
         "responses": {
@@ -213,6 +216,48 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/contracts/{contractId}/activity": {
+      "get": {
+        "tags": [
+          "contracts"
+        ],
+        "summary": "Event counts per time bucket for one contract",
+        "description": "Counts events per `minute`, `hour` or `day` of ledger close time, within the optional `from`/`to` range, oldest bucket first. Buckets with no events are omitted, so a client drawing a chart should fill the gaps with zero. Answers \"how many events per hour this week\" without paging every event.",
+        "operationId": "getContractActivity",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ContractId"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityBucket"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityFrom"
+          },
+          {
+            "$ref": "#/components/parameters/ActivityTo"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Counts per bucket",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Activity"
                 }
               }
             }
@@ -433,6 +478,9 @@
           },
           {
             "$ref": "#/components/parameters/SuccessfulOnly"
+          },
+          {
+            "$ref": "#/components/parameters/Fields"
           }
         ],
         "responses": {
@@ -480,6 +528,9 @@
                 "0020166232959352832-0000000000"
               ]
             }
+          },
+          {
+            "$ref": "#/components/parameters/Fields"
           }
         ],
         "responses": {
@@ -697,6 +748,51 @@
           "type": "string"
         },
         "example": "exposure"
+      },
+      "Fields": {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Comma-separated event properties to return, e.g. `id,ledger,topics,value`. Omit for every property (the default). `topicsXdr` and `valueXdr` roughly double the payload and are rarely read; leaving them out shrinks the response. Unknown names are rejected with 400.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "id,ledger,topics,value"
+      },
+      "ActivityBucket": {
+        "name": "bucket",
+        "in": "query",
+        "required": false,
+        "description": "Width of each time bucket, aligned to the epoch.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "minute",
+            "hour",
+            "day"
+          ],
+          "default": "hour"
+        }
+      },
+      "ActivityFrom": {
+        "name": "from",
+        "in": "query",
+        "required": false,
+        "description": "Inclusive lower bound on ledger close time. An ISO-8601 timestamp, or epoch seconds.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "2026-09-15T00:00:00Z"
+      },
+      "ActivityTo": {
+        "name": "to",
+        "in": "query",
+        "required": false,
+        "description": "Inclusive upper bound on ledger close time. An ISO-8601 timestamp, or epoch seconds.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "2026-09-22T00:00:00Z"
       }
     },
     "responses": {
@@ -1280,6 +1376,51 @@
               "type": "string"
             },
             "description": "Ids with no indexed event."
+          }
+        }
+      },
+      "ActivityBucket": {
+        "type": "object",
+        "required": [
+          "start",
+          "count"
+        ],
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Bucket start (UTC); the bucket covers `[start, start + width)`."
+          },
+          "count": {
+            "type": "integer",
+            "description": "Events whose ledger closed in this bucket."
+          }
+        }
+      },
+      "Activity": {
+        "type": "object",
+        "required": [
+          "contractId",
+          "bucket",
+          "buckets"
+        ],
+        "properties": {
+          "contractId": {
+            "$ref": "#/components/schemas/ContractIdString"
+          },
+          "bucket": {
+            "type": "string",
+            "enum": [
+              "minute",
+              "hour",
+              "day"
+            ]
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivityBucket"
+            }
           }
         }
       }

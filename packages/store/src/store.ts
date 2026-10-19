@@ -1,5 +1,7 @@
 import type {
   ContractSpecRecord,
+  TimeBucket,
+  TimeBucketCount,
   TopicCount,
   ContractSummary,
   EventPage,
@@ -97,6 +99,14 @@ export interface EventStore {
    * first — "what event types exist in here at all", without paging the table.
    */
   countByTopic(limit?: number): Promise<TopicCount[]>;
+
+  /**
+   * Count events matching `query` per fixed-width time bucket, by ledger close
+   * time (`fromTime`/`toTime` bound the range, as for `queryEvents`).
+   * Buckets are aligned to the epoch, ordered oldest first, and sparse: a
+   * bucket with no events is omitted. `limit`, `cursor` and `order` are ignored.
+   */
+  countByTimeBucket(query: EventQuery, bucket: TimeBucket): Promise<TimeBucketCount[]>;
 
   getStats(): Promise<StoreStats>;
 
