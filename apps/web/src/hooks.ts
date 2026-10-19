@@ -34,6 +34,52 @@ export function usePolling(tick: () => void, intervalMs: number, enabled: boolea
   }, [intervalMs, enabled]);
 }
 
+/**
+ * Subscribe to a Server-Sent Events stream.
+ *
+ * `connected` is true only while the stream is open, so a caller can run its
+ * polling fallback exactly when it is false: before the first connection, while
+ * the browser is retrying after a drop, and for good when there is no
+ * `EventSource` at all. The browser reconnects on its own and resends
+ * `Last-Event-ID`, so events missed during a drop are replayed, not lost.
+ */
+export function useEventStream(
+  url: string | null,
+  onMessage: (data: string, id: string) => void,
+  onOpen: () => void,
+): boolean {
+  const [connected, setConnected] = useState(false);
+  const savedMessage = useRef(onMessage);
+  savedMessage.current = onMessage;
+  const savedOpen = useRef(onOpen);
+  savedOpen.current = onOpen;
+
+  useEffect(() => {
+    if (!url || typeof EventSource === 'undefined') {
+      setConnected(false);
+      return;
+    }
+    const source = new EventSource(url);
+    source.onopen = (): void => {
+      setConnected(true);
+      savedOpen.current();
+    };
+    source.onmessage = (message: MessageEvent<string>): void => {
+      savedMessage.current(message.data, message.lastEventId);
+    };
+    // CONNECTING means the browser is already retrying; CLOSED means it gave up
+    // (e.g. a 4xx on connect), and polling carries on alone.
+    source.onerror = (): void => setConnected(false);
+
+    return () => {
+      source.close();
+      setConnected(false);
+    };
+  }, [url]);
+
+  return connected;
+}
+
 /** Debounce a rapidly-changing value, so typing a contract id fires one request. */
 export function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);

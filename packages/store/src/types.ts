@@ -157,8 +157,25 @@ export interface EventQuery {
   successfulOnly?: boolean | undefined;
   /** 1..1000. Defaults to 50. */
   limit?: number | undefined;
-  /** Keyset cursor: return events strictly before/after this event id. */
+  /**
+   * Keyset cursor: the event id a page continues from. With the default
+   * `direction`, events strictly after it in `order`; with `'backward'`, events
+   * strictly before it.
+   */
   cursor?: string | undefined;
+  /**
+   * Which way to page from `cursor`. `'forward'` (the default) continues in
+   * `order`; `'backward'` returns the page immediately before `cursor`, still
+   * listed in `order`, so paging forward and then back returns the original page
+   * exactly. `'backward'` with no cursor returns the last page.
+   */
+  direction?: 'forward' | 'backward' | undefined;
+  /**
+   * Skip the `COUNT(*)` and report `total: 0`. For callers that only follow new
+   * events (the live stream) and would otherwise pay a full filtered count per
+   * poll.
+   */
+  skipTotal?: boolean | undefined;
   /** "desc" (newest first, the default) or "asc". */
   order?: 'asc' | 'desc' | undefined;
 }
@@ -168,6 +185,11 @@ export interface EventPage {
   events: LensEvent[];
   /** Pass back as `cursor` for the next page. `null` when the page is the last. */
   nextCursor: string | null;
+  /**
+   * Pass back as `cursor` with `direction: 'backward'` for the previous page.
+   * `null` when the page is the first.
+   */
+  prevCursor: string | null;
   /** Total rows matching the filter, ignoring limit/cursor. */
   total: number;
   /**

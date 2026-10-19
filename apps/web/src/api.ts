@@ -92,6 +92,22 @@ export function buildEventPath(params: EventQueryParams): string {
   return query ? `${base}?${query}` : base;
 }
 
+/**
+ * The live-stream URL for a filter: `GET /events/stream`, which carries the
+ * contract as `contractId` because there is no path segment for it. Paging
+ * parameters do not apply to a stream and are left out.
+ */
+export function buildStreamPath(params: EventQueryParams): string {
+  const search = new URLSearchParams();
+  if (params.contractId) search.set('contractId', params.contractId);
+  if (params.fromLedger !== undefined) search.set('fromLedger', String(params.fromLedger));
+  if (params.toLedger !== undefined) search.set('toLedger', String(params.toLedger));
+  if (params.successfulOnly) search.set('successfulOnly', 'true');
+  for (const topic of params.topics ?? []) search.append('topic', topic ?? '*');
+  const query = search.toString();
+  return query ? `/events/stream?${query}` : '/events/stream';
+}
+
 export const api = {
   health: (baseUrl: string, signal?: AbortSignal): Promise<Health> =>
     request<Health>(baseUrl, '/health', signal),

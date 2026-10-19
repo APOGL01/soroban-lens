@@ -86,7 +86,7 @@ Open **http://localhost:5173**.
 - Click any row to expand its decoded topics and value, with the raw XDR
   underneath.
 - Click a topic chip to filter by it.
-- **Live updates** is on by default; the table refreshes every 5 seconds.
+- **Live updates** is on by default; new events stream in as they are indexed, falling back to a refresh every 5 seconds if the stream is unavailable.
 
 ## 4. Query it directly (1 min)
 

@@ -17,6 +17,13 @@ Options:
       --cors <origin> Access-Control-Allow-Origin (default: *, env LENS_CORS_ORIGIN)
   -h, --help          Show this help.
 
+Access control (all off unless set):
+  LENS_RATE_LIMIT_RPS    Requests per second allowed per client IP (token bucket).
+  LENS_RATE_LIMIT_BURST  Bucket size (default: LENS_RATE_LIMIT_RPS, rounded up).
+  LENS_API_KEYS          Comma-separated API keys; when set, requests must send
+                         X-API-Key or Authorization: Bearer <key>.
+  LENS_TRUST_PROXY       1 to read the client IP from X-Forwarded-For (behind a proxy).
+
 Optional features (both off by default):
   LENS_GRAPHQL=1                 Serve GraphQL at /graphql.
   LENS_GRAPHQL_MAX_DEPTH=<n>     Deepest query allowed (default 8).
@@ -48,6 +55,30 @@ const dbPath = values.db ?? process.env.LENS_DB_PATH ?? './data/lens.db';
 const port = Number(values.port ?? process.env.LENS_API_PORT ?? 8080);
 const host = values.host ?? process.env.LENS_API_HOST ?? '0.0.0.0';
 
+const rateLimit = parseRateLimit();
+const apiKeys = (process.env.LENS_API_KEYS ?? '')
+  .split(',')
+  .map((key) => key.trim())
+  .filter((key) => key !== '');
+
+function parseRateLimit(): { requestsPerSecond: number; burst?: number } | undefined {
+  const rawRate = process.env.LENS_RATE_LIMIT_RPS;
+  if (rawRate === undefined || rawRate.trim() === '') return undefined;
+  const requestsPerSecond = Number(rawRate);
+  if (!Number.isFinite(requestsPerSecond) || requestsPerSecond <= 0) {
+    log.error('config', `LENS_RATE_LIMIT_RPS must be a positive number, got "${rawRate}".`);
+    process.exit(1);
+  }
+  const rawBurst = process.env.LENS_RATE_LIMIT_BURST;
+  if (rawBurst === undefined || rawBurst.trim() === '') return { requestsPerSecond };
+  const burst = Number(rawBurst);
+  if (!Number.isFinite(burst) || burst < 1) {
+    log.error('config', `LENS_RATE_LIMIT_BURST must be at least 1, got "${rawBurst}".`);
+    process.exit(1);
+  }
+  return { requestsPerSecond, burst };
+}
+
 const store = new SqliteEventStore({ path: dbPath, log });
 
 /** A positive integer from the environment, or undefined when unset or unusable. */
@@ -60,6 +91,9 @@ const graphqlMaxComplexity = envInt('LENS_GRAPHQL_MAX_COMPLEXITY');
 const webhookToken = process.env.LENS_WEBHOOKS_TOKEN;
 const server = createApiServer({
   store,
+  ...(rateLimit ? { rateLimit } : {}),
+  ...(apiKeys.length > 0 ? { apiKeys } : {}),
+  trustProxy: ['1', 'true'].includes((process.env.LENS_TRUST_PROXY ?? '').toLowerCase()),
   network: process.env.LENS_NETWORK ?? 'testnet',
   ...(values.cors ?? process.env.LENS_CORS_ORIGIN
     ? { corsOrigin: values.cors ?? (process.env.LENS_CORS_ORIGIN as string) }
