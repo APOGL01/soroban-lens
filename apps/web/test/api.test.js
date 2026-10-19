@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEventPath, ApiRequestError } from '../.test-build/api.js';
+import { buildEventPath, buildStreamPath, ApiRequestError } from '../.test-build/api.js';
 
 const SAC = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
 
@@ -92,4 +92,20 @@ test('ApiRequestError falls back when the body is not the documented shape', () 
   assert.equal(error.code, 'unknown');
   assert.equal(error.parameter, undefined);
   assert.equal(error.status, 502);
+});
+
+test('the stream path carries the contract as a query parameter and drops paging', () => {
+  const { pathname, params } = parse(
+    buildStreamPath({ contractId: SAC, limit: 50, cursor: 'x', topics: ['transfer', null], successfulOnly: true }),
+  );
+  assert.equal(pathname, '/events/stream');
+  assert.equal(params.get('contractId'), SAC);
+  assert.deepEqual(params.getAll('topic'), ['transfer', '*']);
+  assert.equal(params.get('successfulOnly'), 'true');
+  assert.equal(params.has('limit'), false);
+  assert.equal(params.has('cursor'), false);
+});
+
+test('no filters streams every contract, with no query string', () => {
+  assert.equal(buildStreamPath({}), '/events/stream');
 });
