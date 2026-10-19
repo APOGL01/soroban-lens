@@ -1,0 +1,42 @@
+name: Integration (nightly)
+
+# Runs the opt-in suite against a real local Stellar node (#20). Kept out of
+# ci.yml so the per-push build stays offline and cannot be broken by Docker Hub
+# or a slow node start.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  quickstart:
+    name: stellar/quickstart integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Start a local Stellar network
+        run: docker compose -f docker-compose.integration.yml up -d
+
+      - name: Run the integration suite
+        # Waits for the node to become healthy before it does anything.
+        run: npm run test:integration
+
+      - name: Node logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.integration.yml logs --tail=300
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.integration.yml down -v

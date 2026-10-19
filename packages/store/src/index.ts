@@ -33,6 +33,11 @@ export {
 export { SqliteEventStore, INDEXED_TOPIC_DEPTH } from './sqlite-store.js';
 export type { SqliteStoreOptions } from './sqlite-store.js';
 
+export { PostgresEventStore } from './postgres-store.js';
+export type { PostgresStoreOptions, PgPool, PgClient, PgQueryable, PgQueryResult } from './postgres-store.js';
+export { POSTGRES_MIGRATIONS } from './postgres-schema.js';
+export type { PostgresMigration } from './postgres-schema.js';
+
 export { decodeEvent, decodeScVal, toJsonSafe, scValTypeName, topicKey, extractAddresses } from './decode.js';
 export {
   ContractTypedDecoder,
