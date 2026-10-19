@@ -1,6 +1,8 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { gzipSync, deflateSync } from 'node:zlib';
+import { gzipSync, deflateSync, createGzip, createDeflate } from 'node:zlib';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -10,10 +12,13 @@ import {
   LATEST_SCHEMA_VERSION,
   ContractTypedDecoder,
   SpecCache,
+  type EventQuery,
   type EventStore,
+  type LensEvent,
   type Logger,
 } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
+import { MIN_TOPIC_COLUMNS, eventCsvHeader, eventCsvRow, wantsCsv } from './csv.js';
 import { assertContractId, parseEventQuery, parseIds } from './params.js';
 
 export interface ApiServerOptions {
@@ -32,14 +37,32 @@ export interface ApiServerOptions {
   log?: Logger;
 }
 
+/**
+ * A response written incrementally rather than built in memory (#41).
+ *
+ * `open` is called only when a body is actually going to be sent — never for
+ * HEAD — and runs before the status line is written, so a store failure while
+ * preparing the export is still an ordinary JSON 500 rather than a truncated 200.
+ */
+interface StreamedCsv {
+  filename: string;
+  open: () => Promise<AsyncIterable<string>>;
+}
+
+type HandlerResult =
+  | { status?: number; body: unknown; contentType?: string }
+  | { stream: StreamedCsv };
+
 type Handler = (ctx: {
   params: string[];
   query: URLSearchParams;
+  /** The request's `Accept` header, for content negotiation. */
+  accept: string | string[] | undefined;
   store: EventStore;
   options: ApiServerOptions;
   /** Parsed contract specs, for the typed view of each event (#33). */
   specs: SpecCache;
-}) => Promise<{ status?: number; body: unknown; contentType?: string }>;
+}) => Promise<HandlerResult>;
 
 /** Matches "/contracts/{id}/events" and friends. */
 interface Route {
@@ -75,6 +98,69 @@ async function assertSchemaCurrent(store: EventStore): Promise<void> {
       'A migration is pending; see GET /health.',
     MIGRATION_RETRY_AFTER_SECONDS,
   );
+}
+
+/** Rows fetched per store query while exporting. Bounded by the configured query ceiling. */
+const CSV_PAGE_SIZE = Math.min(500, MAX_QUERY_LIMIT);
+
+/**
+ * Every event matching `query`, a page at a time.
+ *
+ * Walks the keyset cursor so memory stays at one page however large the export.
+ * `limit`, when given, caps the total rows (it is the page size everywhere
+ * else); without it the export is everything that matches. `cursor` and `order`
+ * are honoured, so an export can resume where an earlier page ended.
+ */
+async function* eachEventPage(store: EventStore, query: EventQuery): AsyncGenerator<LensEvent[]> {
+  let remaining = query.limit ?? Number.POSITIVE_INFINITY;
+  let cursor = query.cursor;
+  while (remaining > 0) {
+    const page = await store.queryEvents({
+      ...query,
+      limit: Math.min(remaining, CSV_PAGE_SIZE),
+      ...(cursor ? { cursor } : {}),
+    });
+    if (page.events.length > 0) yield page.events;
+    remaining -= page.events.length;
+    if (!page.nextCursor) return;
+    cursor = page.nextCursor;
+  }
+}
+
+function topicColumnsOf(events: LensEvent[]): number {
+  return events.reduce((max, e) => Math.max(max, e.topics.length), MIN_TOPIC_COLUMNS);
+}
+
+async function* csvRows(events: LensEvent[], topicColumns: number): AsyncGenerator<string> {
+  yield eventCsvHeader(topicColumns);
+  for (const event of events) yield eventCsvRow(event, topicColumns);
+}
+
+/**
+ * Stream a filtered export as CSV.
+ *
+ * The header names one column per topic position, so its width has to be known
+ * before the first row — and events can carry more topics than the four
+ * indexed ones. One scan sizes the columns; the second writes the rows. That
+ * trades a second read for a header that is correct for every row, which a
+ * spreadsheet or pandas needs (a row wider than its header fails to parse).
+ */
+function csvExport(store: EventStore, query: EventQuery, filename: string): StreamedCsv {
+  return {
+    filename,
+    open: async () => {
+      let topicColumns = MIN_TOPIC_COLUMNS;
+      for await (const events of eachEventPage(store, query)) {
+        topicColumns = Math.max(topicColumns, topicColumnsOf(events));
+      }
+      return (async function* () {
+        yield eventCsvHeader(topicColumns);
+        for await (const events of eachEventPage(store, query)) {
+          for (const event of events) yield eventCsvRow(event, topicColumns);
+        }
+      })();
+    },
+  };
 }
 
 const routes: Route[] = [
@@ -132,9 +218,13 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/contracts\/([^/]+)\/events$/,
-    handler: async ({ params, query, store, specs }) => {
+    handler: async ({ params, query, accept, store, specs }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
-      const page = await store.queryEvents({ ...parseEventQuery(query), contractId });
+      const eventQuery = { ...parseEventQuery(query), contractId };
+      if (wantsCsv(query, accept)) {
+        return { stream: csvExport(store, eventQuery, `${contractId}-events.csv`) };
+      }
+      const page = await store.queryEvents(eventQuery);
       return { body: { ...page, events: await specs.annotate(page.events) } };
     },
   },
@@ -195,7 +285,8 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/events$/,
-    handler: async ({ query, store, specs }) => {
+    handler: async ({ query, accept, store, specs }) => {
+      const csv = wantsCsv(query, accept);
       // ?ids= is a batch lookup, not a filter: it resolves a known list in one
       // round trip rather than N. It short-circuits the filter path entirely,
       // since mixing "these exact events" with "events matching X" has no
@@ -203,6 +294,10 @@ const routes: Route[] = [
       const ids = parseIds(query);
       if (ids) {
         const found = await Promise.all(ids.map((id) => store.getEvent(id)));
+        if (csv) {
+          const events = found.filter((e): e is NonNullable<typeof e> => e !== null);
+          return { stream: { filename: 'events.csv', open: async () => csvRows(events, topicColumnsOf(events)) } };
+        }
         return {
           body: {
             events: await specs.annotate(found.filter((e): e is NonNullable<typeof e> => e !== null)),
@@ -212,7 +307,9 @@ const routes: Route[] = [
           },
         };
       }
-      const page = await store.queryEvents(parseEventQuery(query));
+      const eventQuery = parseEventQuery(query);
+      if (csv) return { stream: csvExport(store, eventQuery, 'events.csv') };
+      const page = await store.queryEvents(eventQuery);
       return { body: { ...page, events: await specs.annotate(page.events) } };
     },
   },
@@ -374,10 +471,22 @@ export function createApiServer(options: ApiServerOptions): Server {
       const result = await route.handler({
         params: match ? match.slice(1) : [],
         query: url.searchParams,
+        accept: req.headers.accept,
         store,
         options,
         specs,
       });
+
+      if ('stream' in result) {
+        await sendCsv(res, result.stream, isHead, req.headers['accept-encoding']);
+        const durationMs = Date.now() - started;
+        log.info(
+          'request_handled',
+          `${req.method} ${url.pathname}${url.search} -> 200 csv (${durationMs}ms)`,
+          { method: req.method, path: url.pathname, status: 200, durationMs, requestId },
+        );
+        return;
+      }
 
       send(res, result.status ?? 200, result.body, result.contentType, isHead, req.headers['accept-encoding']);
       const status = result.status ?? 200;
@@ -388,6 +497,29 @@ export function createApiServer(options: ApiServerOptions): Server {
         { method: req.method, path: url.pathname, status, durationMs, requestId },
       );
     } catch (error) {
+      // A failure after a streamed body has started cannot become a JSON error:
+      // the status line is already sent. Cut the connection so the client sees
+      // an aborted download rather than a CSV that quietly ends early.
+      if (res.headersSent) {
+        // The client hanging up on a long download is routine, not a server fault.
+        const aborted = (error as NodeJS.ErrnoException)?.code === 'ERR_STREAM_PREMATURE_CLOSE';
+        if (aborted) {
+          log.info('request_aborted', `${req.method} ${url.pathname} aborted by the client`, {
+            method: req.method,
+            path: url.pathname,
+            requestId,
+          });
+        } else {
+          log.error(
+            'request_failed',
+            `${req.method} ${url.pathname} failed mid-stream: ${error instanceof Error ? error.stack : error}`,
+            { method: req.method, path: url.pathname, requestId },
+          );
+        }
+        // No argument: an error here would surface as an unhandled 'error' event on res.
+        res.destroy();
+        return;
+      }
       const apiError =
         error instanceof ApiError
           ? error
@@ -423,6 +555,41 @@ function pickEncoding(acceptEncoding: string | string[] | undefined): 'gzip' | '
   return undefined;
 }
 
+/**
+ * Write a streamed CSV body with backpressure, gzipped when the client allows.
+ *
+ * No Content-Length — the size is unknown until the last page — so Node uses
+ * chunked transfer. HEAD gets the headers a GET would, without reading the
+ * store at all: scanning a large export to answer a HEAD would defeat its point.
+ */
+async function sendCsv(
+  res: ServerResponse,
+  csv: StreamedCsv,
+  headOnly: boolean,
+  acceptEncoding: string | string[] | undefined,
+): Promise<void> {
+  // Opened before any header is written, so a store failure is still a clean 500.
+  const chunks = headOnly ? undefined : await csv.open();
+  const encoding = pickEncoding(acceptEncoding);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${csv.filename}"`,
+    ...(encoding ? { 'Content-Encoding': encoding } : {}),
+    Vary: 'Accept, Accept-Encoding',
+    'Cache-Control': 'no-store',
+  });
+  if (!chunks) {
+    res.end();
+    return;
+  }
+
+  const source = Readable.from(chunks);
+  if (encoding === 'gzip') await pipeline(source, createGzip(), res);
+  else if (encoding === 'deflate') await pipeline(source, createDeflate(), res);
+  else await pipeline(source, res);
+}
+
 function send(
   res: ServerResponse,
   status: number,
@@ -449,7 +616,8 @@ function send(
     // A cache or proxy in front of this must know the body varies by this
     // header, or it can serve a gzipped response to a client that never asked
     // for one (or vice versa).
-    Vary: 'Accept-Encoding',
+    // Accept too: the event-list routes negotiate JSON versus CSV on it.
+    Vary: 'Accept, Accept-Encoding',
     'Cache-Control': 'no-store',
   });
   res.end(headOnly ? undefined : (compressed ?? payload));

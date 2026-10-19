@@ -1,0 +1,39 @@
+# Runs the shared EventStore conformance suite (#38) against Postgres (#22):
+#
+#   docker compose -f docker-compose.postgres.yml up --build --abort-on-container-exit
+#
+# The same suite already runs against SQLite in `npm test`; here it runs against
+# both backends from one parameterised run, with Postgres provided by a
+# throwaway container. Exits non-zero if any test fails.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lens
+      POSTGRES_PASSWORD: lens
+      POSTGRES_DB: lens
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lens -d lens"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  store-conformance:
+    image: node:24
+    working_dir: /app
+    volumes:
+      - .:/app
+      # Keep the container's node_modules off the host checkout.
+      - store-node-modules:/app/node_modules
+    environment:
+      LENS_TEST_POSTGRES_URL: postgres://lens:lens@postgres:5432/lens
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # `pg` is an optional peer dependency, so it is installed here without
+    # touching package.json or the lockfile.
+    command: >
+      sh -c "npm ci && npm install --no-save pg@8 && npm test -w @soroban-lens/store"
+
+volumes:
+  store-node-modules:

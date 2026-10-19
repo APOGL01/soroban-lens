@@ -1,6 +1,6 @@
 import { access, constants, mkdir, rm, writeFile, statfs } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { LensRpcClient, isContractId, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
+import { LensRpcClient, isContractId, describeClockSkew, CONTRACT_ID_HINT } from '@soroban-lens/ingest';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION } from '@soroban-lens/store';
 import { redactHeaders, type LensConfig } from './config.js';
 
@@ -38,6 +38,7 @@ export async function runDoctor(config: LensConfig): Promise<CheckResult[]> {
     checkDiskSpace(config.dataDir),
     checkDatabase(config.dbPath),
     checkRpc(config),
+    checkClockSkew(config),
   ]);
   return [...checks, checkContractIds(config.contractIds), checkRpcHeaders(config.rpcHeaders)];
 }
@@ -178,6 +179,48 @@ async function checkRpc(config: LensConfig): Promise<CheckResult> {
         config.network.name === 'mainnet'
           ? 'There is no free public mainnet RPC with useful retention. Set LENS_RPC_URL to your own node or a provider.'
           : 'Check network access and that LENS_RPC_URL is correct. The public testnet endpoint is https://soroban-testnet.stellar.org.',
+    };
+  }
+}
+
+/**
+ * Local clock versus the network's latest ledger close time (#18).
+ *
+ * A warning, not a failure: the indexer still runs, but every time-based query
+ * is then built on timestamps that do not mean what they appear to — which is
+ * exactly the silent wrong answer this check exists to surface.
+ */
+async function checkClockSkew(config: LensConfig): Promise<CheckResult> {
+  const client = new LensRpcClient({
+    rpcUrl: config.network.rpcUrl,
+    ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
+    timeoutSeconds: 10,
+  });
+  try {
+    const skew = await client.clockSkew({ thresholdSeconds: config.clockSkewThresholdSeconds });
+    if (!skew.exceedsThreshold) {
+      return {
+        name: 'Clock skew',
+        status: 'pass',
+        detail: `${skew.skewSeconds}s versus ledger ${skew.latestLedger} (threshold ${skew.thresholdSeconds}s)`,
+      };
+    }
+    return {
+      name: 'Clock skew',
+      status: 'warn',
+      detail: describeClockSkew(skew),
+      fix:
+        `More than ${skew.thresholdSeconds}s of skew. Time-based queries (fromTime/toTime) use the ledger close time, ` +
+        'so a wrong local clock makes them misleading. Sync this machine with NTP (chrony, systemd-timesyncd, or the ' +
+        'host\'s clock in a container); if the clock is right, the RPC node may be lagging the network. ' +
+        'Raise LENS_CLOCK_SKEW_THRESHOLD_SECONDS to silence this.',
+    };
+  } catch (error) {
+    return {
+      name: 'Clock skew',
+      status: 'warn',
+      detail: `could not read the latest ledger's close time: ${message(error)}`,
+      fix: 'Skew could not be measured. If the Soroban RPC check above passes, check that the node supports getLatestLedger.',
     };
   }
 }

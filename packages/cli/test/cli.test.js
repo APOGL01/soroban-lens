@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, chmod, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore } from '@soroban-lens/store';
@@ -265,3 +266,78 @@ test('prune removes rows below the ledger and shrinks the database', async () =>
   assert.ok(after.sizeBytes < before.sizeBytes);
   await rm(dir, { recursive: true, force: true });
 });
+
+/** A fake RPC answering getHealth and getLatestLedger, the two calls doctor makes. */
+async function fakeRpc(closeTimeSeconds) {
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const { method, id } = JSON.parse(body);
+    response.setHeader('content-type', 'application/json');
+    const result =
+      method === 'getHealth'
+        ? { status: 'healthy', latestLedger: 500, oldestLedger: 100, ledgerRetentionWindow: 400 }
+        : { id: 'x', sequence: 500, protocolVersion: 23, closeTime: String(closeTimeSeconds) };
+    response.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((r) => server.close(r)) };
+}
+
+test('doctor reports clock skew beyond the threshold as a warning, not a failure', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-skew-'));
+  // A ledger that "closed" two hours ago: the local clock is two hours ahead.
+  const rpc = await fakeRpc(Math.floor(Date.now() / 1000) - 7200);
+  try {
+    const config = resolveConfig({ dataDir: dir, db: join(dir, 'lens.db'), rpcUrl: rpc.url, contracts: [SAC] }, {});
+    const results = await runDoctor(config);
+
+    const skew = find(results, 'Clock skew');
+    assert.equal(skew.status, 'warn');
+    assert.match(skew.detail, /ahead of ledger 500/);
+    assert.match(skew.fix, /NTP/);
+    assert.match(skew.fix, /LENS_CLOCK_SKEW_THRESHOLD_SECONDS/);
+
+    const { text, exitCode } = formatReport(results);
+    assert.match(text, /Clock skew/);
+    assert.equal(exitCode, 0, 'skew is a warning: it must not fail the preflight');
+  } finally {
+    await rpc.close();
+  }
+});
+
+test('doctor passes the clock check when local time is close to the ledger close time', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-skew-'));
+  const rpc = await fakeRpc(Math.floor(Date.now() / 1000) - 3);
+  try {
+    const config = resolveConfig({ dataDir: dir, db: join(dir, 'lens.db'), rpcUrl: rpc.url, contracts: [SAC] }, {});
+    assert.equal(find(await runDoctor(config), 'Clock skew').status, 'pass');
+  } finally {
+    await rpc.close();
+  }
+});
+
+test('LENS_CLOCK_SKEW_THRESHOLD_SECONDS moves the threshold', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-skew-'));
+  const rpc = await fakeRpc(Math.floor(Date.now() / 1000) - 120);
+  try {
+    const overrides = { dataDir: dir, db: join(dir, 'lens.db'), rpcUrl: rpc.url, contracts: [SAC] };
+    const strict = resolveConfig(overrides, {});
+    assert.equal(find(await runDoctor(strict), 'Clock skew').status, 'warn');
+
+    const lenient = resolveConfig(overrides, { LENS_CLOCK_SKEW_THRESHOLD_SECONDS: '600' });
+    assert.equal(lenient.clockSkewThresholdSeconds, 600);
+    assert.equal(find(await runDoctor(lenient), 'Clock skew').status, 'pass');
+  } finally {
+    await rpc.close();
+  }
+});
+
+test('doctor warns that skew could not be measured when the RPC is unreachable', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-doctor-skew-'));
+  const config = resolveConfig({ dataDir: dir, db: join(dir, 'lens.db'), rpcUrl: DEAD_RPC, contracts: [SAC] }, {});
+  const skew = find(await runDoctor(config), 'Clock skew');
+  assert.equal(skew.status, 'warn');
+  assert.match(skew.detail, /could not read/);
+});
+
