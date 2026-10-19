@@ -90,6 +90,88 @@ export function runEventStoreSuite(options: EventStoreSuiteOptions): void {
     await store.close();
   });
 
+  for (const order of ['desc', 'asc'] as const) {
+    test(`[${name}] paging forward then back returns the original pages exactly (order: ${order})`, async () => {
+      const store = await seeded();
+
+      // Walk forward, remembering each page and the prevCursor it handed out.
+      const forward: { ids: string[]; prevCursor: string | null }[] = [];
+      let cursor: string | undefined;
+      for (let guard = 0; guard < 100; guard++) {
+        const page = await store.queryEvents({ limit: 5, order, ...(cursor ? { cursor } : {}) });
+        forward.push({ ids: page.events.map((e) => e.id), prevCursor: page.prevCursor });
+        if (!page.nextCursor) break;
+        cursor = page.nextCursor;
+      }
+      assert.ok(forward.length > 2, 'the fixture must span several pages for this to mean anything');
+      assert.equal(forward[0]!.prevCursor, null, 'the first page has no previous page');
+      assert.ok(forward.slice(1).every((p) => p.prevCursor !== null), 'every later page has one');
+
+      // Walk back from the last page: each step must reproduce the page before it.
+      for (let i = forward.length - 1; i > 0; i--) {
+        const back = await store.queryEvents({
+          limit: 5,
+          order,
+          direction: 'backward',
+          cursor: forward[i]!.prevCursor!,
+        });
+        assert.deepEqual(
+          back.events.map((e) => e.id),
+          forward[i - 1]!.ids,
+          `going back from page ${i} must return page ${i - 1} exactly`,
+        );
+        assert.equal(back.prevCursor, forward[i - 1]!.prevCursor);
+        assert.notEqual(back.nextCursor, null, 'a page reached by going back has a page after it');
+      }
+      await store.close();
+    });
+  }
+
+  test(`[${name}] backward without a cursor returns the last page, and it has no nextCursor`, async () => {
+    const store = await seeded();
+    const forwardAll: string[] = [];
+    let cursor: string | undefined;
+    for (let guard = 0; guard < 100; guard++) {
+      const page = await store.queryEvents({ limit: 5, ...(cursor ? { cursor } : {}) });
+      forwardAll.push(...page.events.map((e) => e.id));
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    const last = await store.queryEvents({ limit: 5, direction: 'backward' });
+    assert.deepEqual(last.events.map((e) => e.id), forwardAll.slice(-5));
+    assert.equal(last.nextCursor, null);
+    assert.notEqual(last.prevCursor, null);
+    await store.close();
+  });
+
+  test(`[${name}] a single page has neither cursor`, async () => {
+    const store = await seeded();
+    const page = await store.queryEvents({ limit: 1000 });
+    assert.equal(page.nextCursor, null);
+    assert.equal(page.prevCursor, null);
+    await store.close();
+  });
+
+  test(`[${name}] getLatestEventId is the newest id, and null when empty`, async () => {
+    const empty = await createStore();
+    assert.equal(await empty.getLatestEventId(), null);
+    await empty.close();
+
+    const store = await seeded();
+    const newest = await store.queryEvents({ limit: 1 });
+    assert.equal(await store.getLatestEventId(), newest.events[0]!.id);
+    await store.close();
+  });
+
+  test(`[${name}] skipTotal leaves the events alone and reports no total`, async () => {
+    const store = await seeded();
+    const counted = await store.queryEvents({ limit: 5 });
+    const skipped = await store.queryEvents({ limit: 5, skipTotal: true });
+    assert.deepEqual(skipped.events, counted.events);
+    assert.equal(skipped.total, 0);
+    await store.close();
+  });
+
   test(`[${name}] order: 'asc' reverses the default newest-first stream`, async () => {
     const store = await seeded();
     const desc = await store.queryEvents({ limit: 1000 });

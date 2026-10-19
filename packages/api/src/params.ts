@@ -82,6 +82,11 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
     throw ApiError.badRequest(`"order" must be "asc" or "desc", got "${order}".`, 'order');
   }
 
+  const direction = params.get('direction') ?? undefined;
+  if (direction !== undefined && direction !== 'forward' && direction !== 'backward') {
+    throw ApiError.badRequest(`"direction" must be "forward" or "backward", got "${direction}".`, 'direction');
+  }
+
   const fromLedger = intParam(params, 'fromLedger');
   const toLedger = intParam(params, 'toLedger');
   if (fromLedger !== undefined && toLedger !== undefined && fromLedger > toLedger) {
@@ -142,6 +147,7 @@ export function parseEventQuery(params: URLSearchParams): EventQuery {
   return {
     ...(limit !== undefined ? { limit } : {}),
     ...(order !== undefined ? { order: order as 'asc' | 'desc' } : {}),
+    ...(direction !== undefined ? { direction: direction as 'forward' | 'backward' } : {}),
     ...(fromLedger !== undefined ? { fromLedger } : {}),
     ...(toLedger !== undefined ? { toLedger } : {}),
     ...(fromTime !== undefined ? { fromTime } : {}),

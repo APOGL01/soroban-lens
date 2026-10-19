@@ -88,6 +88,13 @@ export interface EventStore {
 
   queryEvents(query: EventQuery): Promise<EventPage>;
 
+  /**
+   * The greatest event id in the store, or `null` when it is empty. Cheap enough
+   * to call on every request: the API derives its `ETag` from it and the live
+   * stream polls it to learn whether anything new was indexed.
+   */
+  getLatestEventId(): Promise<string | null>;
+
   /** Contracts seen so far, most recently active first. */
   listContracts(limit?: number): Promise<ContractSummary[]>;
 

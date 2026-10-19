@@ -29,6 +29,8 @@ New here? These need one file each and have an obvious finished state:
 the [`good first issue`](https://github.com/soroban-forge-labs/soroban-lens/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 label.
 
+Looking for something newer? [Round two](#round-two) adds issues #126–#225.
+
 Want to move the needle most? **#2** (no history past ~7 days) and **#22**
 (SQLite is the only backend) are the two real ceilings on what soroban-lens can
 do. **#62** (the UI has no behavioural tests) is the biggest quality gap.
@@ -1174,6 +1176,841 @@ included, built in CI to GitHub Pages.
 
 **Done when:** the site builds from the same sources — no duplicated content —
 and search finds content in the module READMEs.
+
+---
+
+## Round two
+
+A second hundred, filed as issues #126–#225 once the first round was mostly
+merged. Same rules: each one names the code it is about, what to change, and how
+you know it worked, and the numbers here are the GitHub issue numbers.
+
+Good first issues in this round: [#130](https://github.com/soroban-forge-labs/soroban-lens/issues/130), [#132](https://github.com/soroban-forge-labs/soroban-lens/issues/132), [#137](https://github.com/soroban-forge-labs/soroban-lens/issues/137), [#145](https://github.com/soroban-forge-labs/soroban-lens/issues/145), [#150](https://github.com/soroban-forge-labs/soroban-lens/issues/150), [#158](https://github.com/soroban-forge-labs/soroban-lens/issues/158), [#160](https://github.com/soroban-forge-labs/soroban-lens/issues/160), [#166](https://github.com/soroban-forge-labs/soroban-lens/issues/166), [#167](https://github.com/soroban-forge-labs/soroban-lens/issues/167), [#171](https://github.com/soroban-forge-labs/soroban-lens/issues/171), [#172](https://github.com/soroban-forge-labs/soroban-lens/issues/172), [#188](https://github.com/soroban-forge-labs/soroban-lens/issues/188), [#189](https://github.com/soroban-forge-labs/soroban-lens/issues/189), [#194](https://github.com/soroban-forge-labs/soroban-lens/issues/194), [#200](https://github.com/soroban-forge-labs/soroban-lens/issues/200), [#202](https://github.com/soroban-forge-labs/soroban-lens/issues/202), [#205](https://github.com/soroban-forge-labs/soroban-lens/issues/205), [#206](https://github.com/soroban-forge-labs/soroban-lens/issues/206), [#210](https://github.com/soroban-forge-labs/soroban-lens/issues/210), [#213](https://github.com/soroban-forge-labs/soroban-lens/issues/213), [#217](https://github.com/soroban-forge-labs/soroban-lens/issues/217).
+
+| Module | trivial | medium | high |
+|---|---|---|---|
+| Module 1 — Ingestion & RPC Client (`packages/ingest`) | 9 | 10 | 1 |
+| Module 2 — Decoding & Storage (`packages/store`) | 8 | 9 | 3 |
+| Module 3 — Query API (`packages/api`) | 11 | 9 | 0 |
+| Module 4 — Web UI (`apps/web`) | 12 | 7 | 1 |
+| Module 5 — Deployment, Docs & DX | 8 | 12 | 0 |
+| **Total (100)** | **48** | **47** | **5** |
+
+---
+
+### Module 1 — Ingestion & RPC Client (`packages/ingest`) · Person A
+
+#### 126. Stop retrying errors that can never succeed — `medium`
+
+`withRetry` (`packages/ingest/src/retry.ts`) retries every rejection the same way. A JSON-RPC `-32600` "invalid request", a `400`, or a `401` from a bad provider key is retried five times with backoff before anything else sees it. The worst case is the retention-gap recovery in `EventPoller.stream()`: it can only run after the out-of-range cursor error has been retried to exhaustion, so a restart after downtime stalls for up to the full backoff budget first.
+
+Classify errors before retrying: transport failures, `429` and `5xx` retry; JSON-RPC request errors and other `4xx` fail immediately. Keep the classifier in one exported function so the metrics error kinds and the retry decision cannot disagree.
+
+**Done when:** a `-32600` rejects on the first attempt, a `503` still retries, and the poller test for the retention-gap restart no longer waits through backoff.
+
+#### 127. Cursor key ignores topic filters and event type — `medium`
+
+`defaultCursorKey(rpcUrl, contractIds)` in `poller.ts` hashes only the RPC host and the contract ids. Run the indexer with `--topic` once, then without it, and the second run resumes the first run's cursor: it silently skips everything the filtered run never fetched. The same happens when switching `--type contract` to `--type system`.
+
+Include the event type and the topic filters in the key. Existing keys must keep working: if the filters are the defaults, produce exactly today's key, so nobody's indexer re-reads seven days of history after upgrading.
+
+**Done when:** changing `--topic` or `--type` starts a new stream, and an unfiltered default config still resolves to the same key as before (with a test pinning it).
+
+#### 128. Human-readable `--topic` values — `medium`
+
+`--topic` only accepts a base64 XDR `ScVal` or `*`. Nobody types base64 by hand; in practice people run a one-off script to encode `transfer` as a symbol first.
+
+Accept typed shorthands alongside base64: `sym:transfer`, `str:hello`, `addr:G…`/`addr:C…`, `u32:5`, `i128:-10`, `bool:true`. Encode with `nativeToScVal` / `xdr.ScVal` from the SDK. A bare value with no prefix stays base64 so existing scripts do not change meaning.
+
+**Done when:** `--topic sym:transfer` filters SAC transfers on testnet, an unknown prefix is a usage error naming the accepted ones, and the help text shows an example.
+
+#### 129. More than one topic filter per stream — `medium`
+
+`parseTopicFlags` in `packages/ingest/src/bin.ts` turns every `--topic` into one positional prefix: `[flags]`. The RPC accepts up to five topic filters per event filter, ORed together, so "transfers or mints" needs two indexers today.
+
+Add a way to express several filters, for example `--topics 'sym:transfer,*' --topics 'sym:mint,*'`, keeping repeated `--topic` as the single-filter form. Enforce the RPC limits (five filters, four segments each) with messages that say which limit was hit.
+
+**Done when:** one stream receives both transfer and mint events from the testnet XLM contract, and six filters is a clear usage error.
+
+#### 130. Validate numeric flags in `soroban-lens-ingest` — `trivial`
+
+`--start-ledger`, `--end-ledger`, `--page-size`, `--poll-interval` and `--max-events` go through a bare `Number()`. `--page-size abc` becomes `NaN`, and `Math.min(NaN, 10000)` is `NaN`, which is then sent to the RPC as the page limit. The retry flags already use the `numeric()` helper; these five do not.
+
+Reject non-integers and out-of-range values (`--page-size` 1–10000, ledgers ≥ 1, intervals ≥ 0) before anything reaches the network, exiting with code 2 like the other usage errors.
+
+**Done when:** each flag has a test for a non-numeric value and an out-of-range value, and both exit 2 with a message naming the flag.
+
+#### 131. Clean shutdown on Ctrl-C for `soroban-lens-ingest` — `trivial`
+
+`EventPoller` takes an `AbortSignal` for exactly this, but `packages/ingest/src/bin.ts` never creates one. Ctrl-C or `SIGTERM` kills the process wherever it is, the metrics server is never closed, and nothing is logged.
+
+Create an `AbortController`, abort it on `SIGINT`/`SIGTERM`, let the stream finish the batch it is on, then close the metrics server and exit 0. A second signal should exit immediately.
+
+**Done when:** a test sends `SIGTERM` to the child process and sees exit code 0, a final log line, and no partial NDJSON line on stdout.
+
+#### 132. Check the StrKey checksum on contract ids — `trivial`
+
+`CONTRACT_ID_PATTERN` in `contract-id.ts` only checks the shape: `C` plus 55 base32 characters. A typo that keeps the length and alphabet passes validation and is sent to the RPC, which is the confusing failure that file exists to prevent.
+
+Use `StrKey.isValidContract` from `@stellar/stellar-sdk`, which also verifies the CRC16 checksum. Keep the existing hint text, and add one sentence for the "right shape, wrong checksum" case, which almost always means a mistyped character.
+
+**Done when:** a valid id with one character changed is rejected before any network call, and `lens doctor` reports it the same way.
+
+#### 133. Liveness and readiness endpoints on the metrics server — `medium`
+
+The metrics server answers `/metrics` and nothing else. The compose healthcheck for the indexer works around this by reading a heartbeat file in `/tmp`, which has its own problems (see the healthcheck issues in Module 5).
+
+Add `/healthz` (process is up) and `/readyz` (a page has been fetched successfully within the last few poll intervals, and the last RPC call did not exhaust its retries). Both return a small JSON body. Readiness must not depend on events arriving: a quiet contract at the tip is healthy.
+
+**Done when:** `/readyz` turns 503 when the RPC is unreachable and back to 200 when it returns, and the docs show a compose healthcheck that uses it.
+
+#### 134. Measure lag from ledger close times, not a 5 s guess — `trivial`
+
+`lagSeconds` is `lagLedgers × APPROX_LEDGER_SECONDS`. Every event already carries `ledgerClosedAt`, so the real "how far behind" is available for free: the gap between the last event's close time and now (or the RPC's latest ledger close time).
+
+Report the measured value alongside the estimate, keeping the estimate for empty pages where no close time is known. Update the CLI log line and the metrics docs.
+
+**Done when:** on a backfill the reported lag matches the age of the last event to within a second, and an empty page still reports the estimate.
+
+#### 135. Per-contract event counter on `/metrics` — `medium`
+
+`lens_events_ingested_total` has no labels, so with several contracts configured you cannot tell which one went quiet. That is the first thing anyone asks when an alert fires.
+
+Add a `contract` label for configured contracts. When watching every contract, the label set is unbounded, so cap it (for example the first 50 contracts seen, the rest under `contract="other"`) and document the cap.
+
+**Done when:** a two-contract run shows separate series, and an all-contracts run never produces more series than the cap.
+
+#### 136. Split HTTP errors into client and server errors in metrics — `trivial`
+
+`IngestMetrics.rpcError` reports every HTTP failure that is not a 429 as `kind="http"`. A `401` from a mistyped provider key and a `503` from a provider outage land in the same series, and they need very different responses.
+
+Report `kind="http_4xx"` and `kind="http_5xx"` (keeping `rate_limit` for 429). Update `docs/metrics.md` and the example alert rules.
+
+**Done when:** a test feeds a 401 and a 503 and sees two different series, and the alert example distinguishes them.
+
+#### 137. Clean up orphaned cursor temp files — `trivial`
+
+`FileCursorStore.save` writes `<key>.cursor.json.<pid>.tmp` and then renames it. If the process dies between the two, the temp file stays forever, and after many restarts the data directory fills with them. `clear()` also writes `{}` into the file instead of removing it.
+
+On construction, delete stale `*.tmp` files for this store. Make `clear()` unlink the file (ignoring ENOENT), and check that `load` still treats a missing file as no cursor.
+
+**Done when:** a test leaves a temp file behind, constructs a new store, and finds it gone, and `clear()` leaves no file.
+
+#### 138. Detect an RPC node that has stopped advancing — `medium`
+
+If a node falls out of sync, `getEvents` keeps answering with the same `latestLedger`. The poller sees short pages, decides it is caught up, sleeps and asks again, forever. Nothing in the logs or metrics says the network moved on and the node did not.
+
+Track `latestLedger` across polls. If it has not moved for a configurable time (default 60 s, about 12 ledgers), log a warning once and set a `lens_rpc_stalled` gauge. Clear both when it moves again. This does not need failover (#12) to be useful.
+
+**Done when:** a fake client returning a fixed `latestLedger` triggers the warning after the threshold, and the gauge clears on the next advance.
+
+#### 139. Check the network passphrase on startup — `trivial`
+
+`--network mainnet --rpc-url <a testnet node>` is accepted without complaint, and every stored event is labelled mainnet. The RPC's `getNetwork` method returns the passphrase, and `NETWORKS` already holds the expected one.
+
+Call `getNetwork` once before the first poll and fail with a clear message if the passphrase does not match the selected network. Add the same check to `lens doctor`.
+
+**Done when:** a testnet URL with `--network mainnet` fails before indexing anything, and the matching case passes.
+
+#### 140. Back off polling on quiet contracts — `medium`
+
+At the tip, the poller sleeps `pollIntervalMs` (2 s) and asks again, whether the contract emits every ledger or once a week. A quiet contract costs about 43 000 requests a day, which matters on a metered provider.
+
+After consecutive empty polls, grow the idle interval up to a cap (for example 30 s), and reset to the base interval as soon as an event arrives. Make the cap configurable, and keep the default behaviour unchanged when it is set equal to the base.
+
+**Done when:** a fake client with no events shows the interval growing to the cap, one event resets it, and the setting is documented.
+
+#### 141. Load contract ids from a file — `medium`
+
+Contracts come from repeated `-c` flags or the comma-separated `LENS_CONTRACT_IDS`. Past a handful of ids that is unreadable, and there is nowhere to write down why a contract is being watched.
+
+Add `--contracts-file <path>`: one id per line, `#` comments allowed, blank lines ignored. Every id is validated with the same rules as `-c`, and errors report the line number.
+
+**Done when:** a file with comments and 20 ids indexes the same as passing them on the command line, and a bad id reports its line.
+
+#### 142. Add a contract without replaying every other one — `high`
+
+The cursor key is a hash of the whole contract set. Add one contract to a running indexer and the key changes, so the new stream starts again from the oldest retained ledger for every contract, re-reading up to seven days that are already stored.
+
+Give contracts their own progress: existing contracts continue from their cursor, and a newly added contract is backfilled from its start ledger by a separate stream until it catches up, then merged into the main one. Removing a contract should not reset the others either.
+
+**Done when:** adding a contract to a running config re-reads no events for the others (verified by counting RPC pages in a test), and the new contract ends up fully indexed.
+
+#### 143. Record and replay RPC traffic for tests — `medium`
+
+Poller tests use hand-written fake clients. They are fast, but they only cover the responses someone thought to write, and real RPC quirks (cursor formats, error bodies, close-time strings) have to be guessed.
+
+Add a small recorder that wraps the real client and writes `getHealth` / `getEvents` request and response pairs to a fixture file, plus a fake client that replays such a file. Commit one recording from testnet and use it in at least one poller test. This is the cheap complement to the quickstart integration test (#20).
+
+**Done when:** a poller test runs end to end from a committed recording with no network, and the README explains how to refresh it.
+
+#### 144. Decide what `--type diagnostic` means — `trivial`
+
+`EventType` and the `--type` flag accept `diagnostic`, but `RawEvent.type` in `packages/ingest/src/types.ts` documents that the RPC only emits `contract` and `system`, and the store's `type` column and types only allow those two. Either the flag can never return anything, or it returns events the rest of the pipeline is not typed for.
+
+Find out which, against a real node. Then either remove `diagnostic` from the flag and the docs, or widen the types end to end and add a test that stores one.
+
+**Done when:** the flag, the types and the store agree, and the issue records what the RPC actually returned.
+
+#### 145. Fill in the retention close times or drop them — `trivial`
+
+`LensRpcClient.retention()` returns `latestLedgerCloseTime: ''` and `oldestLedgerCloseTime: ''` every time. They are declared in `RetentionState`, so they look like data, but nothing ever sets them.
+
+The `getEvents` response includes the latest and oldest ledger close times. Fill the fields from a real source, or remove them from `RetentionState` if nothing needs them. Either way, no field should be a permanent empty string.
+
+**Done when:** the fields carry real timestamps or no longer exist, and a test covers whichever you chose.
+
+---
+
+### Module 2 — Decoding & Storage (`packages/store`) · Person B
+
+#### 146. Topic filters cannot tell a symbol from a string — `medium`
+
+`topicKey` in `decode.ts` stores only the rendered value in `topic0`…`topic3`. The symbol `transfer` and the string `"transfer"` are both `transfer`, and the u32 `5`, the i128 `5` and the string `"5"` are all `5`. A topic filter matches all of them.
+
+Keep the type with the key, for example a parallel `topicN_type` column or a `symbol:transfer` encoding, and let a query ask for a type. Plain values must keep matching as they do today, so existing API callers see no change.
+
+**Done when:** a query for symbol `transfer` excludes a string `transfer`, an untyped query still returns both, and the migration backfills existing rows.
+
+#### 147. Filter an address by where it appears — `medium`
+
+`event_addresses` already records the position of every address (`topic0`…`topicN` or `value`), but `EventQuery.address` matches it anywhere. For a SAC transfer, "transfers from G…" and "transfers to G…" are the questions people ask, and today both get the union.
+
+Add an optional `addressPosition` (`topic1`, `value`, …) that narrows the existing subquery. The index on `(address, event_id)` may need `position` added; check with `EXPLAIN QUERY PLAN`.
+
+**Done when:** on the fixture, filtering an address at `topic1` returns only events where it is the sender, and the query plan still uses the index.
+
+#### 148. Find payments to muxed accounts — `medium`
+
+Under CAP-67, a SAC transfer to a muxed account emits the base `G…` address as a topic and carries the muxed id in the event data (`to_muxed_id`). The address index stores the `G…` address only, so there is no way to ask for events for one `M…` address, and searching the `M…` string finds nothing.
+
+When the data carries a muxed id, store it next to the address. Accept an `M…` address in `EventQuery.address` and match it as base account plus muxed id.
+
+**Done when:** a fixture transfer to a muxed account is found by its `M…` address, and searching the base `G…` address still finds it too.
+
+#### 149. Map keys that are not scalars lose information — `medium`
+
+Decoded values come from `scValToNative`, which builds a map as a plain JS object. Keys go through property-key coercion: a `bytes` key becomes a comma-joined byte list, a `vec` key its joined elements, a `map` key `[object Object]`. Two different keys can become the same string, and one value silently overwrites the other.
+
+Detect maps whose keys are not symbols, strings or numbers, and render them as an ordered array of `{ key, value }` pairs, with each key decoded the normal way. Scalar-keyed maps keep their current shape, since that is what every caller expects.
+
+**Done when:** a test map with two distinct `vec` keys decodes to two entries, and scalar-keyed maps are byte-for-byte unchanged.
+
+#### 150. Filter by event type — `trivial`
+
+Every row stores `type` (`contract` or `system`), but `EventQuery` has no way to filter on it. Anyone indexing system events alongside contract events gets both in every query.
+
+Add `type?: 'contract' | 'system'` to `EventQuery`, add it to `buildWhere`, and add a case to the conformance suite in `testing.ts` so every backend has to support it.
+
+**Done when:** the conformance suite covers both values and the SQLite store passes it.
+
+#### 151. Query several contracts at once — `trivial`
+
+`EventQuery.contractId` takes one id. A dashboard for a protocol with a token, a pool and a router has to make three requests and merge three keyset cursors itself.
+
+Add `contractIds?: string[]` (capped, for example at 20) using `contract_id IN (…)`. Keep `contractId` working, and reject a query that sets both.
+
+**Done when:** a two-contract query returns both contracts' events in one correctly ordered page, and pagination across it works.
+
+#### 152. Keep contract summaries up to date instead of recomputing them — `medium`
+
+`listContracts` runs `COUNT(*)`, `MIN(ledger)`, `MAX(ledger)` and a `GROUP BY` over the whole events table on every call. The UI calls it through `/contracts`, and in all-contracts mode that table is the biggest one in the database.
+
+Keep a `contract_summaries` table updated in the same transaction as each insert, plus prune and import. Add a `lens verify` check that compares it against a fresh `GROUP BY`.
+
+**Done when:** `listContracts` reads only the summary table, a bench shows the difference on a large fixture, and `lens verify` catches a summary that has drifted.
+
+#### 153. Topic counts for positions other than the first — `trivial`
+
+`listTopics(contractId)` counts only `topic0`. For a SAC, `topic0` is just `transfer`/`mint`/`burn`, and the useful question is which addresses appear in `topic1` and `topic2`.
+
+Add an optional `position` (0–3) parameter, defaulting to 0 so current callers are unchanged. Use the existing topic columns, and add an index only if `EXPLAIN QUERY PLAN` shows a full scan.
+
+**Done when:** `listTopics(id, { position: 1 })` returns the most frequent senders on the fixture, and the default output is unchanged.
+
+#### 154. Prune one contract, or by age — `medium`
+
+`pruneBefore(ledger)` deletes below one ledger for every contract. You cannot drop a noisy contract you no longer care about, or keep "the last 30 days" without working out a ledger number yourself.
+
+Add a contract-scoped prune and an age-based prune (`olderThanDays`, using `closed_at_unix`). The address and FTS side tables have to be cleaned in the same transaction.
+
+**Done when:** pruning one contract leaves every other contract's rows untouched, and `lens verify` passes afterwards.
+
+#### 155. Export a subset of the database — `trivial`
+
+`exportSnapshot` writes every event. Sharing one contract's history for a bug report, or moving one contract to another instance, means exporting everything and filtering the NDJSON by hand.
+
+Accept an `EventQuery`-style filter (contract, ledger range, time range) in `exportSnapshot` and `lens export`. Import needs no change.
+
+**Done when:** `lens export out.ndjson -c C…` writes only that contract, and re-importing it into an empty database round-trips.
+
+#### 156. Filter on typed field values — `high`
+
+Typed decoding (#33) works out field names and types when an event is read, so nothing can filter on them: "transfers over 1 000 XLM" is not a query you can run. The amounts are i128 values stored as decimal strings, and comparing those as text gives the wrong answer.
+
+Store typed fields in a side table (event id, field name, numeric value where it fits, text value otherwise), filled at insert and again when a contract's spec arrives later. Support equality on any field and range comparisons on numeric fields. Keep it optional and measure the cost of the insert path.
+
+**Done when:** a range query on `amount` returns the right fixture events, a spec arriving after the events backfills them, and the insert benchmark is in the PR.
+
+#### 157. Keep a contract's spec for each Wasm version — `high`
+
+`contract_specs` has one row per contract. When a contract is upgraded to new Wasm, the new spec replaces the old one, and every older event is then decoded with a spec that may not match it. The result is wrong field names, or a typed view that silently disappears.
+
+Store specs per Wasm hash, and record the ledger at which each contract switched hash. Decode each event with the spec that was live at its ledger, and show which hash was used in the typed view.
+
+**Done when:** a test with two Wasm versions decodes events on each side of the upgrade with the right spec, and existing rows migrate without a re-fetch.
+
+#### 158. Open the store read-only — `trivial`
+
+`SqliteEventStore` always opens the file read-write and runs `PRAGMA journal_mode = WAL` in the constructor. The API only ever reads, but a bug in it could still write, and it cannot be pointed at a read-only snapshot.
+
+Add a `readOnly` option that opens with `node:sqlite`'s read-only flag, skips migrations and the WAL pragma, and makes every write method throw a clear error. The API change itself is a separate Module 3 issue.
+
+**Done when:** a read-only store serves queries from a file another process is writing, and `insertEvents` on it throws.
+
+#### 159. Keep slow queries from blocking the API — `high`
+
+`node:sqlite` is synchronous. Every store method is `async` in name only, so a slow full-text search or a `COUNT(*)` over millions of rows blocks the API's event loop: health checks, other requests and response compression all wait behind it.
+
+Move reads to a small `worker_threads` pool, each worker with its own read-only connection, behind the same `EventStore` interface. Measure p99 latency for concurrent cheap requests while an expensive one is running, before and after.
+
+**Done when:** a slow search no longer delays a concurrent `/health`, the conformance suite passes against the pooled store, and the numbers are in the PR.
+
+#### 160. Count decode failures in `getStats` — `trivial`
+
+Rows that fail to decode are kept with `decode_error` set, and `lens redecode` can fix them later. But `getStats` and `lens stats` do not say how many there are, so nobody knows when it is worth running.
+
+Add `decodeErrorCount` to `StoreStats`, show it in `lens stats` with a hint to run `lens redecode` when it is above zero, and return it from `/stats`.
+
+**Done when:** seeding a fixture with one bad row shows a count of 1, and the hint appears.
+
+#### 161. Refuse a database written by a newer version — `trivial`
+
+`#migrateSync` applies any migration it knows about that is missing, and never looks at versions it does not know. Open a database created by a newer soroban-lens (version 7) with an older build (which knows 6), and it carries on against a schema it does not understand.
+
+If `schema_migrations` contains a version above the highest known migration, fail with a message naming both versions and telling the user to upgrade.
+
+**Done when:** a test inserts version 999 into `schema_migrations` and gets that error from `migrate()`.
+
+#### 162. Property-based tests for the decoder — `medium`
+
+`decode.test.js` checks hand-picked values. The decoder's promise is broader: it never throws, and its output always survives a JSON round-trip, whatever a contract emits. That is exactly what generated inputs test well.
+
+Add a generator for random, nested `ScVal`s covering every arm, and assert that `decodeEvent` never throws, `JSON.parse(JSON.stringify(x))` deep-equals `x`, and `extractAddresses` finds every address that was put in. Use a fixed seed in CI, and print the seed on failure.
+
+**Done when:** the property test runs on every CI build in under 10 seconds, and any failure can be reproduced from its printed seed.
+
+#### 163. Retention by database size — `medium`
+
+Disk is the limit operators actually hit, but prune works only by ledger. Keeping "about 20 GB" today means watching the volume and running prune by hand.
+
+Add an optional size target. When `sizeBytes + walSizeBytes` exceeds it, prune the oldest ledgers in chunks until it fits, then checkpoint. Run it on an interval from the indexer, and log what was removed.
+
+**Done when:** a test with a tiny target prunes the oldest rows first and stops once under the target, and the setting is documented.
+
+#### 164. Filter topics past the fourth position — `medium`
+
+Only `topic0`…`topic3` are columns, so `INDEXED_TOPIC_DEPTH` is 4 and deeper filters are rejected. The RPC can only filter four segments, but events can carry more (`fixtures/README.md` documents this), and the store has every one of them.
+
+Index topic positions 4 and up in a side table, the same pattern as `event_addresses`, and allow filters on them. Positions 0–3 keep using the existing columns.
+
+**Done when:** a filter on `topic5` returns the right fixture event, and queries on 0–3 have the same plan as before.
+
+#### 165. Query events by when they were indexed — `trivial`
+
+`indexed_at` is indexed (#36), but `EventQuery` cannot filter on it. Anything that syncs out of the database incrementally (a webhook sender, an export job) wants "everything indexed since my last run", which is not the same as ledger order during a backfill.
+
+Add `indexedAfter` (ISO timestamp, exclusive) to `EventQuery` and the conformance suite.
+
+**Done when:** a test inserts two batches and gets only the second with `indexedAfter` set to the first batch's time.
+
+---
+
+### Module 3 — Query API (`packages/api`) · Person C
+
+#### 166. Validate `limit` on `/contracts` and `/contracts/{id}/topics` — `trivial`
+
+Both handlers in `packages/api/src/server.ts` do `Number(query.get('limit'))` with no check. `limit=abc` passes `NaN` to the store, and `limit=-1` passes a negative number. `/events` already rejects both through `parseEventQuery`.
+
+Use the same integer parsing and range check, return `400` with the parameter name, and add tests.
+
+**Done when:** `limit=abc`, `limit=0` and `limit=100000` all return `400` on both routes.
+
+#### 167. Validate the API's startup flags — `trivial`
+
+`packages/api/src/bin.ts` does `Number(values.port ?? …)`. `--port abc` gives `NaN`, and Node then listens on a random port while the log line still prints `NaN`.
+
+Reject a port that is not an integer from 1 to 65535 with exit code 2, the same way `parseMetricsPort` does for the indexer.
+
+**Done when:** `--port abc` and `--port 70000` exit 2 with a clear message.
+
+#### 168. `GET /transactions/{txHash}` — `trivial`
+
+The store can filter by `txHash`, but there is no route that answers "what did this transaction emit?" in one call, ordered the way it happened. That is the most common question when debugging a contract call.
+
+Add the route: every event for the hash, ordered by operation index and then event id, plus a small summary (ledger, close time, contracts touched, whether the call succeeded). Return `404` if nothing is stored for that hash, and update `openapi.json`.
+
+**Done when:** the route returns the fixture transaction's events in order, an unknown hash returns 404, and the OpenAPI lint passes.
+
+#### 169. Address summary endpoint — `medium`
+
+`/events?address=` lists events, but the first question about an address is a summary: which contracts it has touched, how often, and when it was first and last seen.
+
+Add `GET /addresses/{address}` returning per-contract counts and first/last ledger from `event_addresses`. Validate the address shape, and update `openapi.json`.
+
+**Done when:** the fixture's busiest address returns correct counts per contract, and an unseen address returns empty results rather than an error.
+
+#### 170. Paginate `/contracts` — `medium`
+
+`/contracts` takes `limit` (default 100) and nothing else. In all-contracts mode there can be thousands, and past the first page they are unreachable.
+
+Add keyset pagination ordered by last ledger, with `nextCursor` shaped like `/events`. Keep the current response fields so existing callers do not break.
+
+**Done when:** walking every page returns each contract exactly once, including while new events arrive.
+
+#### 171. Allow more than one CORS origin — `trivial`
+
+`LENS_CORS_ORIGIN` is one string written to `Access-Control-Allow-Origin`. A staging UI and a production UI pointed at the same API cannot both work, except with `*`.
+
+Accept a comma-separated list. Echo the request's `Origin` when it is on the list, omit the header when it is not, and add `Vary: Origin`. `*` keeps working as it does now.
+
+**Done when:** tests cover an allowed origin, a disallowed one, and `*`.
+
+#### 172. Let browsers read `X-Request-Id` — `trivial`
+
+The API sets `X-Request-Id` on every response so a bug report can be matched to a log line. Cross-origin, the browser hides it, because there is no `Access-Control-Expose-Headers`, so the UI cannot show it in an error message.
+
+Expose `X-Request-Id` (and `Retry-After`, which the 503 path sets).
+
+**Done when:** a test checks the header, and the UI issue that shows the request id in errors can use it.
+
+#### 173. Cache headers for data that does not change — `trivial`
+
+Every response is sent with `Cache-Control: no-store`. An event fetched by id never changes (short of a redecode), and `/openapi.json` changes only with a deploy, yet every reload fetches both again.
+
+Send a modest `max-age` for `/events/{id}` and `/openapi.json`, and keep `no-store` on lists, `/status` and `/health`. This complements ETags (#47); it does not replace them.
+
+**Done when:** tests pin the header for each route class, and the README says which routes are cacheable.
+
+#### 174. Compress without blocking the event loop — `medium`
+
+`send()` uses `gzipSync` / `deflateSync`. A 1 000-row page with raw XDR is several hundred KB, and compressing it synchronously stalls every other request. Brotli, which most browsers prefer, is not offered at all.
+
+Switch to the async zlib functions or streams, add `br` when the client accepts it, and keep the size threshold so small bodies are not compressed.
+
+**Done when:** a test sees `Content-Encoding: br` for a client that asks for it, and a large response no longer delays a concurrent `/health` measurably.
+
+#### 175. Serve the API from a read-only connection — `trivial`
+
+Once the store has a `readOnly` option (Module 2), the API should use it. The API never writes, and a read-only connection makes that a guarantee rather than a convention.
+
+Open the store read-only in `packages/api/src/bin.ts`. `/health` and the schema-currency check must still work, and if the database has not been migrated yet the API should report it clearly, since it can no longer migrate.
+
+**Done when:** the API serves the fixture from a read-only connection, and an unmigrated database gives a clear 503.
+
+#### 176. Security headers — `trivial`
+
+Responses carry no `X-Content-Type-Options`, `Referrer-Policy`, or `Content-Security-Policy`. `/docs` serves an HTML page that loads Redoc, which is where a CSP matters most.
+
+Add `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` everywhere, and a CSP on `/docs` that allows exactly what the page loads.
+
+**Done when:** tests pin the headers, and `/docs` still renders with the CSP in place.
+
+#### 177. Configure server timeouts — `trivial`
+
+The API runs with Node's default `headersTimeout`, `requestTimeout` and `keepAliveTimeout`. Behind a load balancer the keep-alive default is a known source of intermittent 502s, and nothing bounds a client that sends headers slowly.
+
+Set explicit values, make them configurable through env, and document what to set when running behind a proxy.
+
+**Done when:** the values are set in `bin.ts`, a test checks them on the created server, and the README has a short section on them.
+
+#### 178. Filter `/events` by type and by several contracts — `trivial`
+
+Once the store supports filtering by event type and by several contracts (Module 2), expose both as `type=` and `contractIds=` (comma-separated), with the same validation style as the other parameters.
+
+Reject `contractId` and `contractIds` together, and cap the list at the store's limit.
+
+**Done when:** both parameters are in `openapi.json` and tested, including the cap.
+
+#### 179. Contract labels from a file — `trivial`
+
+Contracts are 56-character ids, and every screen shows them raw. Operators know which one is "USDC SAC" or "the pool", but cannot tell soroban-lens.
+
+Load an optional JSON file (`LENS_CONTRACT_LABELS`) mapping contract id to label, and include `label` on `/contracts` and `/contracts/{id}/stats`. A file keeps the API read-only, and invalid ids in it fail at startup.
+
+**Done when:** labels appear on both routes, a missing file means no labels rather than an error, and the format is documented.
+
+#### 180. Stream results as NDJSON — `medium`
+
+Pulling a large range through `/events` means paging 1 000 rows at a time. The CSV issue (#41) is about spreadsheets; tooling wants a stream it can pipe into `jq`.
+
+When the request has `Accept: application/x-ndjson`, stream every matching event one line at a time with keyset iteration underneath, keeping memory flat. Add a configurable row cap, and end with a trailer line saying whether the cap was hit.
+
+**Done when:** a 100 000-row stream keeps memory flat, the cap and trailer are tested, and `curl … | jq` works in the README.
+
+#### 181. Report each stream's lag on `/status` — `medium`
+
+`/status` returns each stream's cursor and last ledger, but not how far behind the network it is, because the API never talks to the RPC. The UI cannot say "2 minutes behind" without that.
+
+Have the indexer save the RPC's `latestLedger` and the time it was seen with each stream state, and return `lagLedgers` and the age of that sample from `/status`. Keep the API RPC-free.
+
+**Done when:** `/status` shows lag for a running indexer, and a stopped indexer shows a growing sample age instead of a stale "0 behind".
+
+#### 182. Check every response against `openapi.json` in tests — `medium`
+
+The tests check that `/openapi.json` describes every route, but not that responses match the schemas. A field added to a handler and not to the spec passes CI.
+
+In the API tests, validate each response body against its OpenAPI schema with a small validator, covering the success and error shape of every route. Fail on extra properties wherever the schema says `additionalProperties: false`.
+
+**Done when:** removing a field from a schema makes a test fail, and every route has at least one validated response.
+
+#### 183. Errors as `application/problem+json` — `medium`
+
+Errors use a custom `{ error: { … } }` body. RFC 9457 problem details is the format most HTTP clients and gateways understand.
+
+Serve problem details (`type`, `title`, `status`, `detail`, plus the existing parameter name and request id as extension members) when the client accepts `application/problem+json`, and keep today's body otherwise. Update `openapi.json` for both.
+
+**Done when:** both formats are tested on a 400 and a 404, and the default response is unchanged.
+
+#### 184. Request metrics for the API — `medium`
+
+The indexer has `/metrics`; the API has none. Slow routes and error rates are only visible by reading logs.
+
+Expose request counts and a duration histogram labelled by route pattern (not raw path, to keep the label set bounded), method and status class, in the same hand-written Prometheus format as `packages/ingest/src/metrics.ts`. Serve it on a separate port that is off by default.
+
+**Done when:** after a few requests, `/metrics` shows bounded series, and an unknown path does not create a new one.
+
+#### 185. Version the API under `/v1` — `medium`
+
+Every route lives at the root, with no version anywhere. The first breaking change, such as a renamed field or a changed default, will break every client at once with no transition period.
+
+Serve every route under `/v1` as well as at the root. Mark the root paths as deprecated in `openapi.json` and send a `Deprecation` header on them, and write down in the API README what counts as a breaking change.
+
+**Done when:** every route answers the same under `/v1`, root paths carry the header, and the OpenAPI lint passes.
+
+---
+
+### Module 4 — Web UI (`apps/web`) · Person D
+
+#### 186. Live refresh throws away rows loaded with "Load more" — `medium`
+
+With live updates on, `usePolling` calls `loadFirstPage` every 5 s, and `loadFirstPage` replaces `events` with the first page. Scroll down, click "Load more", read for five seconds, and the list snaps back to 50 rows.
+
+On a live tick, merge new rows in at the top by id and keep everything already loaded. Keep `nextCursor` pointing past the oldest loaded row rather than resetting it.
+
+**Done when:** a test loads two pages, fires a poll, and still has every row from both pages plus any new ones.
+
+#### 187. Show new events without moving the page — `medium`
+
+When a live refresh brings new rows, they are inserted at the top and everything shifts down under the reader's cursor. If someone is reading row 30, it jumps away.
+
+If the table is scrolled away from the top, hold new rows back and show a "N new events" pill, and insert them when it is clicked or when the user scrolls back to the top. At the top, keep inserting immediately.
+
+**Done when:** scrolled down, a poll shows the pill and nothing moves; clicking it inserts the rows and scrolls to the top.
+
+#### 188. Address filter in the UI — `trivial`
+
+The API supports `address=` on `/events` (#23), but the UI only offers contract and topic. Finding everything an account did needs a hand-written API call.
+
+Add an address field next to the topic field, validating `G…`/`C…` shape before sending, and persist it with the other filters.
+
+**Done when:** entering a fixture address lists only its events, and an invalid address shows the same kind of warning as an invalid contract id.
+
+#### 189. Search box — `trivial`
+
+`/events?search=` does full-text substring search (#32), and there is no way to use it from the UI.
+
+Add a debounced search field. Explain the three-character minimum inline instead of sending a query that can only come back empty.
+
+**Done when:** searching a fixture value finds the event, and a two-character query shows the hint without making a request.
+
+#### 190. Time range filter — `trivial`
+
+#68 adds a ledger range to the UI, but people think in time: "what happened in the last hour". The API already takes `fromTime` / `toTime`.
+
+Add presets (last 15 minutes, hour, day) and a custom range, converted to epoch seconds. Show the active range in the result summary.
+
+**Done when:** each preset sends the right parameters, and clearing the range removes them.
+
+#### 191. Transaction view — `medium`
+
+`txHash` is displayed but leads nowhere. When debugging, the useful view is every event the transaction emitted, in order. The API issue for `GET /transactions/{txHash}` provides it.
+
+Make the hash clickable and open a panel listing the transaction's events, with operation indexes, success state, and each event's existing expanded view. The panel should have its own URL once deep links (#63) exist.
+
+**Done when:** clicking a fixture hash shows all its events in order, and closing the panel returns to the same scroll position.
+
+#### 192. Show a contract's declared events — `medium`
+
+`GET /contracts/{id}/spec` returns the events a contract declares (#33), but the UI only uses it indirectly, through typed rows. Seeing the event names and their fields up front is often what someone opening a contract wants first.
+
+When a contract is selected, show a collapsible panel of its declared events and their fields with types, and say where the spec came from (Wasm or Stellar Asset). Clicking an event name filters to it.
+
+**Done when:** the XLM SAC shows its built-in events, a contract without a spec shows an honest "no spec" state, and clicking an event name filters the table.
+
+#### 193. Format token amounts with their decimals — `medium`
+
+SAC amounts are i128 values in stroops, so a 1 XLM transfer shows as `10000000`. Typed decoding knows a field is an `amount`, but the UI shows the raw integer.
+
+For Stellar Asset Contracts (7 decimals), show the formatted amount with the raw value on hover and on copy. Do the arithmetic as a decimal string, never through `Number`, because i128 exceeds safe integers. Leave other contracts' integers alone unless their decimals are known.
+
+**Done when:** fixture SAC transfers show human amounts, a value above 2^53 formats exactly, and non-SAC values are unchanged.
+
+#### 194. Check saved filters before using them — `trivial`
+
+`usePersistentState` returns whatever `JSON.parse` gives back from localStorage, cast to `FilterState`. Once a new filter field is added (address, search, time range), returning users have saved state without it, and the input gets `undefined`, which React reports as switching from uncontrolled to controlled.
+
+Merge stored state over the defaults, drop keys that are not in the defaults, and reset if the stored value is not an object.
+
+**Done when:** a test seeds old-shaped and garbage values, and both render with defaults filled in.
+
+#### 195. Stop fetching `/health` on every live tick — `trivial`
+
+The health effect in `App.tsx` depends on `lastUpdated`, which changes on every successful poll, so live mode fetches `/health` every 5 s as well as `/events`.
+
+Poll health on its own slower interval (for example 30 s), and refresh it right away when a poll fails.
+
+**Done when:** a minute of live mode makes at most a couple of `/health` requests, and a failure still updates the status bar right away.
+
+#### 196. Show "Load more" errors next to the button — `trivial`
+
+A failed `loadMore` sets the same `error` state as the main query, so the page-level banner says the whole view failed when the rows on screen are fine.
+
+Show load-more failures inline next to the button with a retry, and leave the main banner for first-page failures.
+
+**Done when:** a mocked load-more failure shows an inline message and retry, and the table and banner are untouched.
+
+#### 197. Configure API endpoints at runtime — `medium`
+
+`VITE_LENS_NETWORKS` is baked into the bundle at build time (see the `web` service in `docker-compose.yml`), so the same image cannot be pointed at a different API without rebuilding it.
+
+Load `/config.json` at startup, with the same shape as the env variable, and fall back to the build-time value when it is missing. Have the nginx image generate that file from an env var when the container starts.
+
+**Done when:** one built image serves two different API URLs by changing only env, and the dev server still works with no config file.
+
+#### 198. Typed columns in CSV export — `medium`
+
+The CSV export writes topics and value as JSON blobs. With typed decoding, when every row is the same event from one contract, those blobs could be real columns (`from`, `to`, `amount`) that open straight into a spreadsheet.
+
+When the exported rows share one typed event name, write one column per typed field after the standard columns. Otherwise keep today's format. Escape values with the same rules as now.
+
+**Done when:** exporting fixture SAC transfers produces `from,to,amount` columns, and a mixed export is unchanged.
+
+#### 199. Show contract labels where ids appear — `trivial`
+
+Once the API returns contract labels (Module 3), show them wherever a contract id is displayed: in the contract column, in the filter field once one is chosen, and in the status bar. Show the full id on hover.
+
+**Done when:** a labelled fixture contract shows its label in all three places, and unlabelled contracts look exactly as they do now.
+
+#### 200. Mark estimated totals — `trivial`
+
+The store returns `totalIsEstimate: true` when the total comes from its count cache. The UI types do not include the field, and it shows "1,234 events" as if exact.
+
+Pass the field through `types.ts` and render "about 1,234" with a tooltip explaining it when the flag is set.
+
+**Done when:** a mocked page with the flag renders "about", and one without it renders the exact number.
+
+#### 201. End-to-end browser tests against the fixture — `high`
+
+#62 covers component tests. Nothing checks the real thing: the built UI, against a real API, over the seeded fixture database, in a browser.
+
+Add a Playwright suite that seeds the fixture, starts the API, and serves the built UI. Cover filtering by contract and topic, expanding a row, load more, and the empty and error states. Run it in CI with traces uploaded on failure.
+
+**Done when:** the suite runs in CI in under three minutes, and a deliberately broken selector fails it with a useful trace.
+
+#### 202. Page title reflects what you are looking at — `trivial`
+
+The tab always says the same thing. With several tabs open on different contracts, you cannot tell them apart, or see that new events arrived in a background tab.
+
+Set the document title to the active contract (label if known, short id otherwise), and prefix a count of unseen live events while the tab is hidden.
+
+**Done when:** switching contracts updates the title, and a background tab shows the count, which clears when the tab is focused again.
+
+#### 203. Topic suggestions for other positions — `trivial`
+
+The topic field's suggestions only come from `topic0`. Once the store and API can count other positions (Module 2), offer suggestions for the position being filtered, so picking a sender from `topic1` is a click instead of a copy and paste.
+
+**Done when:** suggestions follow the selected position, and the default (first position) behaves as it does now.
+
+#### 204. Show the request id when something fails — `trivial`
+
+When a request fails, the banner shows only the message. Matching a user's screenshot to a log line means guessing by timestamp, even though the API tags every response with `X-Request-Id`.
+
+Once the API exposes the header (Module 3), read it in `api.ts` and show it in error banners in small monospace text, with a copy button.
+
+**Done when:** a failed request's banner shows the id, and it matches the API log line for that request.
+
+#### 205. Click an address to filter by it — `trivial`
+
+Expanded rows and typed fields show addresses inside decoded values, but they are plain text. Following a sender to see what else they did means copying the address into the URL by hand.
+
+Render `G…` and `C…` values in decoded output as buttons that set the address filter, or the contract filter for a `C…` address in contract position. Ordinary strings that merely look similar must not become links: use the decoded type, not a regex on the text.
+
+**Done when:** clicking a sender in a fixture transfer filters to that address, and a string value with the same text stays plain.
+
+---
+
+### Module 5 — Deployment, Docs & DX · Person E
+
+#### 206. Indexer healthcheck passes before the indexer has done anything — `trivial`
+
+The indexer healthcheck in `docker-compose.yml` exits 0 when the heartbeat file does not exist. An indexer that is stuck before its first batch (bad RPC, wrong contract, empty range) reports healthy forever.
+
+Treat a missing heartbeat as unhealthy once `start_period` has passed. Docker already ignores failures during `start_period`, so startup is not affected.
+
+**Done when:** an indexer pointed at an unreachable RPC turns unhealthy, and a working one stays healthy.
+
+#### 207. Heartbeat goes stale on quiet contracts — `medium`
+
+`runIndexer` writes the heartbeat inside `for await (const batch of poller.stream())`, but the poller only yields when a page has new events. At the tip of a contract that emits rarely, nothing is yielded, the heartbeat goes stale after 60 s, and the container is reported unhealthy while working perfectly. The file is also a fixed path in `tmpdir()`, so two indexers on one machine overwrite each other.
+
+Write the heartbeat on every completed poll, not every yielded batch (for example through a progress callback on the poller), and key the file by stream. Better still, once the metrics server has `/readyz` (Module 1), point the healthcheck there.
+
+**Done when:** an indexer on a contract with no events stays healthy for ten minutes, and two indexers keep separate heartbeats.
+
+#### 208. `lens index` is missing `--topic`, `--type` and `--end-ledger` — `medium`
+
+`soroban-lens-ingest` supports topic filters, event type and bounded ranges. `lens index`, which is what docker compose and most people run, passes none of them to `EventPoller`, so there is no way to index only transfers, or to index a fixed historical window into the database.
+
+Add the same flags and env variables to `packages/cli/src/config.ts`, with the same validation, sharing the parsing code with the ingest binary rather than copying it. The cursor-key issue in Module 1 needs to land first, or switching filters will resume the wrong cursor.
+
+**Done when:** `lens index --topic sym:transfer --end-ledger N` stores only transfers up to N and exits, and the help text for both binaries matches.
+
+#### 209. Linting and formatting in CI — `medium`
+
+There is no ESLint or Prettier configuration, so style is whatever each contributor's editor does. Review time goes on formatting, and simple mistakes such as floating promises are caught only by luck.
+
+Add ESLint with `typescript-eslint` (including `no-floating-promises`) and Prettier, matching the current code style as closely as possible. Run them in CI. Land the bulk reformat as its own commit, and list it in `.git-blame-ignore-revs`.
+
+**Done when:** `npm run lint` passes on main, CI fails on a lint error, and `git blame` skips the reformat commit.
+
+#### 210. Add `.editorconfig` and `.nvmrc` — `trivial`
+
+`package.json` requires Node `>=22.13.0` (for `node:sqlite`), but nothing tells nvm, fnm or asdf which version to use, and newcomers on Node 20 get a confusing import error. There is no `.editorconfig` either.
+
+Add `.nvmrc` with the version CI tests on, and an `.editorconfig` matching the current style (2 spaces, LF, final newline). Mention both in CONTRIBUTING.md.
+
+**Done when:** `nvm use` in the repo selects a working Node, and the files match what the code already does.
+
+#### 211. Changelog and versioning — `medium`
+
+Every package is `0.1.0` and there is no changelog, so users cannot tell what changed between two commits they deployed. #83 publishes images and releases; this is the record of what each release contains.
+
+Adopt Changesets (or a similar tool): contributors add a short changeset with each user-facing PR, and the release workflow turns them into `CHANGELOG.md` entries and version bumps. Add a CI check that reminds PRs touching `packages/` without a changeset.
+
+**Done when:** a PR with a changeset produces a changelog entry on release, and the CONTRIBUTING.md section explains the flow in a few lines.
+
+#### 212. Dev container — `medium`
+
+Setting up means the right Node version, building every workspace, then seeding, and Docker if you want compose. A dev container makes that one click in Codespaces or VS Code.
+
+Add `.devcontainer/` with the CI Node version, run `npm ci && npm run build && npm run seed` after creation, and forward the API and web ports.
+
+**Done when:** a fresh Codespace reaches a working UI on the fixture with no manual steps, and the README links to it.
+
+#### 213. `lens config` prints the resolved configuration — `trivial`
+
+Configuration comes from flags, env variables and defaults across `config.ts`. When something behaves unexpectedly, the first question is which value actually won, and there is no way to see that.
+
+Add `lens config`, printing each setting, its value and where it came from (flag, env or default). RPC header values must be redacted, like everywhere else.
+
+**Done when:** each source is shown correctly in a test, and header values never appear in the output.
+
+#### 214. `lens spec refresh` for every contract — `trivial`
+
+`lens spec fetch -c <id>` refreshes one contract. After a contract upgrade, or once the RPC that failed earlier is back, refreshing every stored spec means a shell loop.
+
+Add `lens spec refresh [--only-missing]`, which re-fetches every contract in `contract_specs` (or only the `none` and errored ones), with a concurrency limit and a summary at the end.
+
+**Done when:** the command refreshes the fixture contracts against a fake source in a test, and `--only-missing` skips the ones that already have a spec.
+
+#### 215. Config file support — `medium`
+
+Everything is configured with flags or about 20 `LENS_*` env variables. A deployment with several contracts, headers and retry settings ends up as a long, unreviewable env block.
+
+Support an optional `lens.config.json`, with a JSON Schema, using the same keys as the env variables. The order of precedence is flag, then env, then file, then default. Resolve it in `config.ts` so every command picks it up, and have `lens config` (above) show it as a source.
+
+**Done when:** a config file drives `lens index` in a test, env still overrides it, and the schema is published in `docs/`.
+
+#### 216. Grafana dashboard for the indexer — `medium`
+
+`docs/` has a Prometheus scrape config and alert rules, but no dashboard, so everyone who sets up monitoring draws the same panels from scratch.
+
+Commit a dashboard JSON with ingestion rate, lag, RPC latency percentiles, RPC errors by kind and cursor restarts, built only on metrics that exist. Add it to the compose monitoring setup if there is one, or document how to import it.
+
+**Done when:** the dashboard imports into a clean Grafana and every panel shows data from a running indexer.
+
+#### 217. Test coverage in CI — `trivial`
+
+CI runs the tests but never reports what they cover, so a PR that adds untested code looks the same as one that adds tests.
+
+Run `node --test --experimental-test-coverage` (or c8) for each workspace, publish the summary in the job summary, and start with a threshold just below current coverage so it can only go up.
+
+**Done when:** each CI run shows coverage per package, and lowering coverage below the threshold fails the run.
+
+#### 218. Guide: indexing mainnet through a provider — `trivial`
+
+The mainnet preset carries a warning that SDF does not run a free public mainnet RPC with useful retention, and the docs stop there. Mainnet is where most real use is.
+
+Write `docs/mainnet.md`: choosing a provider, passing its key with `--rpc-header` (never in the URL), retention and what it means for backfill, page size and cost, and a `lens doctor` run that proves it works.
+
+**Done when:** someone with a provider key can follow the guide to index one mainnet contract, and it is linked from the README.
+
+#### 219. API cookbook — `trivial`
+
+`openapi.json` and `/docs` say what each parameter does, not how to answer real questions with them.
+
+Add `docs/api-cookbook.md` with copy-paste `curl | jq` recipes: latest transfers for a token, everything an address did, one transaction's events, paging through a range, and an incremental sync. Check that each recipe works against the fixture.
+
+**Done when:** every recipe runs as written against `lens seed` data, and the API README links to it.
+
+#### 220. Script to refresh the fixtures — `medium`
+
+`fixtures/` holds a captured `getEvents` response and `testnet-specs.json`. They were captured by hand, and testnet resets will eventually make them unrepresentative, with no record of how to recreate them.
+
+Add a script that re-captures both from testnet for a configured set of contracts, trims the result the same way the current fixture is trimmed, and writes it deterministically, so a refresh shows a reviewable diff.
+
+**Done when:** running the script reproduces fixtures of the same shape, all tests pass on them, and `fixtures/README.md` documents it.
+
+#### 221. Run CI on Windows and macOS — `medium`
+
+CI runs only on Linux. The code relies on `rename` over an existing file in the cursor store, `tmpdir()` paths, and file locking in SQLite, all of which behave differently on Windows, and contributors on other systems find out first.
+
+Add Windows and macOS to the test matrix, at least for the unit tests, and fix what fails.
+
+**Done when:** the full test suite passes on all three systems in CI.
+
+#### 222. One command for local development — `medium`
+
+Working on the UI means building every workspace, seeding, starting the API, then starting Vite, across several terminals.
+
+Add `npm run dev`, which builds once, seeds when no database exists, then runs the API and Vite together, with TypeScript watch mode on the packages so edits rebuild. Ctrl-C stops everything.
+
+**Done when:** a fresh clone reaches a working UI with `npm ci && npm run dev`, and editing a package file reloads without a manual rebuild.
+
+#### 223. Publish the packages to npm — `medium`
+
+`@soroban-lens/ingest` and `@soroban-lens/store` are useful as libraries: a typed poller with retries and cursors, and a decoder with a conformance-tested store. They can only be used by cloning the repo. #54 covers a generated API client; this is the packages themselves.
+
+Make the four packages publishable (`files`, `exports`, typings, README per package, no workspace-only paths), and publish them from the release workflow with npm provenance.
+
+**Done when:** `npm install @soroban-lens/ingest` in an empty project can stream events with the README example.
+
+#### 224. `lens doctor --json` — `trivial`
+
+`lens doctor` prints a human report. CI pipelines, deploy scripts and the compose `doctor` service can only check its exit code, not which check failed.
+
+Add `--json` to print the check results as JSON (name, status, detail) to stdout. Keep the exit codes as they are.
+
+**Done when:** `lens doctor --json | jq '.[] | select(.status=="fail")'` lists the failures, and a test pins the shape.
+
+#### 225. Synthetic data generator for large databases — `medium`
+
+Every database used in tests and benches is either the small fixture or whatever a contributor happens to have indexed. Questions like "how does the UI behave with a million rows" (#64) or "is this query plan still good at scale" have nothing reproducible to run against. #98 adds benchmarks, but needs data to run on.
+
+Add a script that writes N realistic events (SAC-shaped transfers, a long tail of contracts, nested values, a few undecodable rows) directly through the store, deterministically from a seed.
+
+**Done when:** `node scripts/synth.js --events 1000000 --seed 1` builds the same database every time in a few minutes, and the bench docs use it.
 
 ---
 

@@ -4,7 +4,7 @@
     "title": "soroban-lens Query API",
     "version": "0.1.0",
     "summary": "Read-only HTTP API over indexed Soroban contract events.",
-    "description": "Serves events indexed from a Soroban RPC node. Read-only and unauthenticated in v0.1.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.\n\nEvery route below also accepts `HEAD`, which returns the same status and headers as `GET` with an empty body \u2014 including the `Content-Length` the body would have had. The `head` operations are not listed separately.\n\nResponses of 1KB or more are gzip- or deflate-compressed when the request's `Accept-Encoding` header allows it, with `Vary: Accept-Encoding` set so a cache in front of this API knows the body varies by that header. A request sending no `Accept-Encoding` \u2014 or `identity` \u2014 always gets uncompressed JSON.",
+    "description": "Serves events indexed from a Soroban RPC node. Read-only. Unauthenticated and unlimited by default; an operator can turn on per-IP rate limiting (`LENS_RATE_LIMIT_RPS`) and API keys (`LENS_API_KEYS`), in which case every route except `/health`, `/openapi.json` and `/docs` requires a key sent as `X-API-Key` or `Authorization: Bearer`, and a client over its limit receives `429` with `Retry-After`.\n\nPagination is keyset-based: pass the `nextCursor` from a response back as `cursor`. Pass the `prevCursor` back as `cursor` together with `direction=backward` to return to the previous page; paging forward and then back returns the original page exactly. Pages stay stable while the indexer writes new events behind them, which offset pagination cannot promise.\n\n`GET /events` and `GET /contracts/{contractId}/events` carry an `ETag` derived from the newest indexed event id and the request's filter. Send it back as `If-None-Match` and an unchanged poll is answered with `304` and no body. `GET /events/stream` pushes new events as Server-Sent Events instead of polling.\n\nDecoded integer values are JSON **strings**, not numbers. Soroban `i128`/`u128` amounts routinely exceed `Number.MAX_SAFE_INTEGER`, so treating them as numbers loses precision on large transfers. Decoded `bytes` are lower-case hex strings.\n\nEvery route below also accepts `HEAD`, which returns the same status and headers as `GET` with an empty body \u2014 including the `Content-Length` the body would have had. The `head` operations are not listed separately.\n\nResponses of 1KB or more are gzip- or deflate-compressed when the request's `Accept-Encoding` header allows it, with `Vary: Accept-Encoding` set so a cache in front of this API knows the body varies by that header. A request sending no `Accept-Encoding` \u2014 or `identity` \u2014 always gets uncompressed JSON.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -60,7 +60,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/stats": {
@@ -80,6 +81,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -105,6 +112,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -146,6 +159,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -168,6 +187,9 @@
           },
           {
             "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Direction"
           },
           {
             "$ref": "#/components/parameters/Order"
@@ -207,6 +229,9 @@
           },
           {
             "$ref": "#/components/parameters/Fields"
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
           }
         ],
         "responses": {
@@ -218,10 +243,27 @@
                   "$ref": "#/components/schemas/EventPage"
                 }
               }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Weak validator derived from the newest indexed event id and this request's filter. Send it back as `If-None-Match`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -308,6 +350,12 @@
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -350,6 +398,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -420,6 +474,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -442,6 +502,9 @@
           },
           {
             "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Direction"
           },
           {
             "$ref": "#/components/parameters/Order"
@@ -481,6 +544,9 @@
           },
           {
             "$ref": "#/components/parameters/Fields"
+          },
+          {
+            "$ref": "#/components/parameters/IfNoneMatch"
           }
         ],
         "responses": {
@@ -499,10 +565,27 @@
                   ]
                 }
               }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Weak validator derived from the newest indexed event id and this request's filter. Send it back as `If-None-Match`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -547,6 +630,91 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/events/stream": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Live events as Server-Sent Events",
+        "description": "Holds the connection open and writes each newly indexed event as it appears, as a `text/event-stream`. Takes the same filters as `GET /events` (plus `contractId`); `limit`, `order`, `cursor` and `direction` do not apply. Each message's `id` is the event id and its `data` is the event JSON, so a dropped connection resumes with `Last-Event-ID` instead of re-reading. Without it the stream starts at the present and carries only events indexed from now on. A comment line is sent every 15 seconds to keep idle connections open. Returns `503` when the instance already has its maximum number of streams open.",
+        "operationId": "streamEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/StreamContractId"
+          },
+          {
+            "$ref": "#/components/parameters/LastEventId"
+          },
+          {
+            "$ref": "#/components/parameters/LastEventIdQuery"
+          },
+          {
+            "$ref": "#/components/parameters/Topic"
+          },
+          {
+            "$ref": "#/components/parameters/FromLedger"
+          },
+          {
+            "$ref": "#/components/parameters/ToLedger"
+          },
+          {
+            "$ref": "#/components/parameters/FromTime"
+          },
+          {
+            "$ref": "#/components/parameters/ToTime"
+          },
+          {
+            "$ref": "#/components/parameters/TxHash"
+          },
+          {
+            "$ref": "#/components/parameters/Address"
+          },
+          {
+            "$ref": "#/components/parameters/Search"
+          },
+          {
+            "$ref": "#/components/parameters/TransactionIndex"
+          },
+          {
+            "$ref": "#/components/parameters/OperationIndex"
+          },
+          {
+            "$ref": "#/components/parameters/SuccessfulOnly"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An open event stream.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-Sent Events. Each message is `id: <event id>` and `data: <event JSON>`, separated by a blank line."
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -567,7 +735,8 @@
               "application/json": {}
             }
           }
-        }
+        },
+        "security": []
       }
     }
   },
@@ -596,7 +765,7 @@
       "Cursor": {
         "name": "cursor",
         "in": "query",
-        "description": "Keyset cursor \u2014 the `nextCursor` of a previous response.",
+        "description": "Keyset cursor \u2014 the `nextCursor` of a previous response (or, with `direction=backward`, its `prevCursor`).",
         "schema": {
           "type": "string"
         }
@@ -793,6 +962,52 @@
           "type": "string"
         },
         "example": "2026-09-22T00:00:00Z"
+      },
+      "Direction": {
+        "name": "direction",
+        "in": "query",
+        "description": "Which way to page from `cursor`. `forward` (the default) continues after it; `backward` returns the page immediately before it, still listed in `order`, so paging forward and then back returns the original page. `backward` with no `cursor` returns the last page.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "forward",
+            "backward"
+          ],
+          "default": "forward"
+        }
+      },
+      "IfNoneMatch": {
+        "name": "If-None-Match",
+        "in": "header",
+        "description": "The `ETag` of a previous response. When nothing has been indexed since, the answer is `304` with no body.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "LastEventId": {
+        "name": "Last-Event-ID",
+        "in": "header",
+        "description": "The `id` of the last event received. The stream resumes just after it, in order, instead of starting at the present. A browser `EventSource` sends this automatically when it reconnects.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "LastEventIdQuery": {
+        "name": "lastEventId",
+        "in": "query",
+        "description": "Same as the `Last-Event-ID` header, for clients that cannot set headers.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "StreamContractId": {
+        "name": "contractId",
+        "in": "query",
+        "description": "Only stream events from this contract.",
+        "schema": {
+          "type": "string",
+          "pattern": "^C[A-Z2-7]{55}$"
+        }
       }
     },
     "responses": {
@@ -830,6 +1045,53 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "The instance requires an API key and none, or an invalid one, was sent. Only returned when the operator has configured `LENS_API_KEYS`.",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "The authentication challenge.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "The client has used up its rate-limit bucket. Only returned when the operator has configured `LENS_RATE_LIMIT_RPS`.",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds to wait before one request is available again.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotModified": {
+        "description": "The `If-None-Match` validator still matches, so nothing changed since the response it came from. No body.",
+        "headers": {
+          "ETag": {
+            "description": "The current validator.",
+            "schema": {
+              "type": "string"
             }
           }
         }
@@ -1134,6 +1396,7 @@
         "required": [
           "events",
           "nextCursor",
+          "prevCursor",
           "total"
         ],
         "properties": {
@@ -1149,6 +1412,13 @@
               "null"
             ],
             "description": "Pass back as `cursor`. Null on the last page."
+          },
+          "prevCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass back as `cursor` with `direction=backward` for the previous page. Null on the first page."
           },
           "total": {
             "type": "integer",
@@ -1424,6 +1694,28 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "An API key from the instance's `LENS_API_KEYS`. Only checked when the operator has configured keys; an instance without them accepts every request."
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The same API key, sent as `Authorization: Bearer <key>`."
+      }
     }
-  }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    },
+    {
+      "BearerAuth": []
+    },
+    {}
+  ]
 }

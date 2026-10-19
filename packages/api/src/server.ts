@@ -1,7 +1,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { gzipSync, deflateSync } from 'node:zlib';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -22,6 +22,9 @@ import {
   parseIds,
   selectFields,
 } from './params.js';
+import { ApiKeyAuthenticator } from './auth.js';
+import { TokenBucketLimiter, clientKey, type RateLimitOptions } from './rate-limit.js';
+import { EventStreamHub, type EventStreamOptions } from './stream.js';
 
 export interface ApiServerOptions {
   store: EventStore;
@@ -37,6 +40,25 @@ export interface ApiServerOptions {
   network?: string;
   /** Structured logger, shared with the store's own logging (#16). Defaults to silent. */
   log?: Logger;
+  /**
+   * Per-client-IP token-bucket limiter (#43). Off by default: without it there is
+   * no limit, exactly as before it existed. /health, /openapi.json and /docs are
+   * never limited, so a probe or a newcomer reading the spec cannot be locked out.
+   */
+  rateLimit?: RateLimitOptions;
+  /**
+   * API keys accepted in `X-API-Key` or `Authorization: Bearer` (#43). Off by
+   * default: with no keys every request is allowed. /health, /openapi.json and
+   * /docs stay open either way.
+   */
+  apiKeys?: string[];
+  /**
+   * Take the client address from `X-Forwarded-For` for rate limiting. Only enable
+   * behind a proxy that sets it; the header is otherwise client-controlled.
+   */
+  trustProxy?: boolean;
+  /** Tuning for `GET /events/stream` (#42). */
+  stream?: EventStreamOptions;
 }
 
 type Handler = (ctx: {
@@ -46,7 +68,17 @@ type Handler = (ctx: {
   options: ApiServerOptions;
   /** Parsed contract specs, for the typed view of each event (#33). */
   specs: SpecCache;
-}) => Promise<{ status?: number; body: unknown; contentType?: string }>;
+  /** The raw exchange, for the one route that streams instead of returning a body. */
+  req: IncomingMessage;
+  res: ServerResponse;
+  streams: EventStreamHub;
+}) => Promise<{
+  status?: number;
+  body: unknown;
+  contentType?: string;
+  /** The handler already wrote the response (a stream), so there is nothing to send. */
+  handled?: true;
+}>;
 
 /** Matches "/contracts/{id}/events" and friends. */
 interface Route {
@@ -55,6 +87,14 @@ interface Route {
   handler: Handler;
   /** Serves without reading event rows, so a pending migration does not block it. */
   exemptFromSchemaCheck?: boolean;
+  /** Open to everyone: skips the rate limiter and API-key check (#43). */
+  public?: boolean;
+  /**
+   * Carries an `ETag` and answers `If-None-Match` with 304 (#47). Such a route
+   * is sent `Cache-Control: no-cache` — store it, but revalidate every time —
+   * instead of `no-store`, which would stop a browser sending the validator.
+   */
+  etag?: boolean;
 }
 
 /**
@@ -91,6 +131,7 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/health$/,
     exemptFromSchemaCheck: true,
+    public: true,
     handler: async ({ store, options }) => {
       const health = await store.healthCheck();
       const stats = await store.getStats();
@@ -139,6 +180,7 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/contracts\/([^/]+)\/events$/,
+    etag: true,
     handler: async ({ params, query, store, specs }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
       const fields = parseFields(query);
@@ -231,6 +273,7 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/events$/,
+    etag: true,
     handler: async ({ query, store, specs }) => {
       // ?ids= is a batch lookup, not a filter: it resolves a known list in one
       // round trip rather than N. It short-circuits the filter path entirely,
@@ -257,6 +300,25 @@ const routes: Route[] = [
     },
   },
   {
+    // Live updates (#42). Takes the same filters as /events, plus `contractId`
+    // since there is no path segment to carry it. Declared before /events/{id},
+    // which would otherwise read "stream" as an event id.
+    method: 'GET',
+    pattern: /^\/events\/stream$/,
+    handler: async ({ query, req, res, streams }) => {
+      const filter = parseEventQuery(query);
+      const contractId = query.get('contractId');
+      const resumeFrom = lastEventId(req, query);
+      await streams.subscribe(
+        req,
+        res,
+        { ...filter, ...(contractId ? { contractId: assertContractId(contractId) } : {}) },
+        resumeFrom,
+      );
+      return { body: null, handled: true };
+    },
+  },
+  {
     method: 'GET',
     pattern: /^\/events\/([^/]+)$/,
     handler: async ({ params, query, store, specs }) => {
@@ -272,6 +334,7 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/openapi\.json$/,
     exemptFromSchemaCheck: true,
+    public: true,
     handler: async () => ({
       body: await servedSpec(),
       contentType: 'application/json; charset=utf-8',
@@ -286,6 +349,7 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/docs$/,
     exemptFromSchemaCheck: true,
+    public: true,
     handler: async () => ({
       body: DOCS_HTML,
       contentType: 'text/html; charset=utf-8',
@@ -392,6 +456,39 @@ export async function shutdownApiServer(
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
+/** The id a reconnecting EventSource sends, or `?lastEventId=` for a client that cannot set headers. */
+function lastEventId(req: IncomingMessage, query: URLSearchParams): string | undefined {
+  const header = req.headers['last-event-id'];
+  const value = ((Array.isArray(header) ? header[0] : header) ?? query.get('lastEventId') ?? '').trim();
+  return value !== '' && value.length <= 200 ? value : undefined;
+}
+
+/**
+ * The validator for a list response (#47): newest event id + route + filter.
+ *
+ * Weak, because the representation is semantically the same across
+ * `Accept-Encoding` variants. Repeated parameters keep their relative order —
+ * `topic` is positional — and only the keys are sorted, so `?a=1&b=2` and
+ * `?b=2&a=1` share a tag but `?topic=x&topic=y` and `?topic=y&topic=x` do not.
+ */
+async function entityTag(store: EventStore, path: string, params: URLSearchParams): Promise<string> {
+  const newest = (await store.getLatestEventId()) ?? '';
+  const filter = [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&');
+  const hash = createHash('sha1').update(`${newest}\n${path}\n${filter}`).digest('base64url');
+  return `W/"${hash}"`;
+}
+
+/** Weak comparison, per RFC 9110 §13.1.2: `If-None-Match` ignores the `W/` prefix. */
+function matchesEntityTag(header: string | string[] | undefined, etag: string): boolean {
+  const value = Array.isArray(header) ? header.join(',') : header;
+  if (!value) return false;
+  const opaque = (tag: string): string => tag.trim().replace(/^W\//, '');
+  return value.split(',').some((candidate) => candidate.trim() === '*' || opaque(candidate) === opaque(etag));
+}
+
 /**
  * Build the HTTP server.
  *
@@ -404,15 +501,28 @@ export function createApiServer(options: ApiServerOptions): Server {
   const { store } = options;
   const log = options.log ?? { debug() {}, info() {}, warn() {}, error() {} };
   const corsOrigin = options.corsOrigin ?? '*';
+  const limiter = options.rateLimit ? new TokenBucketLimiter(options.rateLimit) : undefined;
+  const auth = new ApiKeyAuthenticator(options.apiKeys ?? []);
+  const trustProxy = options.trustProxy ?? false;
   // One per server: specs are per database, and the TTL is what lets a spec
   // the indexer fetches after startup show up without restarting the API.
   const specs = new SpecCache((contractId) => store.getContractSpec(contractId));
+  const streams = new EventStreamHub(store, (events) => specs.annotate(events), log, options.stream);
 
   const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res);
   });
   const active = new Set<ServerResponse>();
   inFlight.set(server, active);
+
+  // An open event stream never ends on its own, so without this `close()` would
+  // wait on it forever and a shutdown signal would hang.
+  const closeServer = server.close.bind(server);
+  server.close = ((callback?: (err?: Error) => void) => {
+    streams.closeAll();
+    return closeServer(callback);
+  }) as Server['close'];
+
   return server;
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -437,7 +547,9 @@ export function createApiServer(options: ApiServerOptions): Server {
 
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, If-None-Match, Last-Event-ID');
+    // Without this a browser hides ETag and Retry-After from cross-origin scripts.
+    res.setHeader('Access-Control-Expose-Headers', 'ETag, Retry-After, X-Request-Id');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
@@ -456,6 +568,28 @@ export function createApiServer(options: ApiServerOptions): Server {
       const path = url.pathname.replace(/\/+$/, '') || '/';
       const route = routes.find((r) => r.pattern.test(path));
 
+      // Before the 404 and the schema check, so a caller who is throttled or
+      // unauthenticated learns nothing about which routes exist or what state the
+      // database is in. The limiter runs first: it is what stops key guessing.
+      if (!route?.public) {
+        if (limiter) {
+          const decision = limiter.take(clientKey(req, trustProxy));
+          if (!decision.allowed) {
+            throw ApiError.tooManyRequests(
+              `Rate limit exceeded. Retry in ${decision.retryAfterSeconds}s.`,
+              decision.retryAfterSeconds,
+            );
+          }
+        }
+        if (!auth.isAuthorized(req)) {
+          throw ApiError.unauthorized(
+            auth.presentedKey(req)
+              ? 'The API key is not valid.'
+              : 'This instance requires an API key: send X-API-Key or Authorization: Bearer <key>.',
+          );
+        }
+      }
+
       if (!route) {
         throw ApiError.notFound(`No route for ${req.method} ${path}. See GET /openapi.json.`);
       }
@@ -473,6 +607,20 @@ export function createApiServer(options: ApiServerOptions): Server {
       // else waits for the schema to be current.
       if (!route.exemptFromSchemaCheck) await assertSchemaCurrent(store);
 
+      // A poll that finds nothing new is answered from the validator alone,
+      // without running the query or serialising a page (#47).
+      const etag = route.etag ? await entityTag(store, path, url.searchParams) : undefined;
+      if (etag && matchesEntityTag(req.headers['if-none-match'], etag)) {
+        res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache', Vary: 'Accept-Encoding' });
+        res.end();
+        log.info(
+          'request_handled',
+          `${req.method} ${url.pathname}${url.search} -> 304 (${Date.now() - started}ms)`,
+          { method: req.method, path: url.pathname, status: 304, durationMs: Date.now() - started, requestId },
+        );
+        return;
+      }
+
       const match = route.pattern.exec(path);
       const result = await route.handler({
         params: match ? match.slice(1) : [],
@@ -480,9 +628,22 @@ export function createApiServer(options: ApiServerOptions): Server {
         store,
         options,
         specs,
+        req,
+        res,
+        streams,
       });
 
-      send(res, result.status ?? 200, result.body, result.contentType, isHead, req.headers['accept-encoding']);
+      if (!result.handled) {
+        send(
+          res,
+          result.status ?? 200,
+          result.body,
+          result.contentType,
+          isHead,
+          req.headers['accept-encoding'],
+          etag && (result.status ?? 200) === 200 ? { etag } : undefined,
+        );
+      }
       const status = result.status ?? 200;
       const durationMs = Date.now() - started;
       log.info(
@@ -491,11 +652,23 @@ export function createApiServer(options: ApiServerOptions): Server {
         { method: req.method, path: url.pathname, status, durationMs, requestId },
       );
     } catch (error) {
+      // Headers already went out (a stream that failed after it opened): there
+      // is no status left to change, so close the connection rather than throw.
+      if (res.headersSent) {
+        log.error('request_failed', `${req.method} ${url.pathname} failed after the response began: ${error}`, {
+          method: req.method,
+          path: url.pathname,
+          requestId,
+        });
+        res.end();
+        return;
+      }
       const apiError =
         error instanceof ApiError
           ? error
           : new ApiError(500, 'internal_error', error instanceof Error ? error.message : String(error));
       if (apiError.allow) res.setHeader('Allow', apiError.allow);
+      if (apiError.wwwAuthenticate) res.setHeader('WWW-Authenticate', apiError.wwwAuthenticate);
       if (apiError.retryAfterSeconds !== undefined) {
         res.setHeader('Retry-After', String(apiError.retryAfterSeconds));
       }
@@ -533,6 +706,7 @@ function send(
   contentType?: string,
   headOnly = false,
   acceptEncoding?: string | string[],
+  validator?: { etag: string },
 ): void {
   // A handler that already produced a JSON string (the OpenAPI document) passes
   // it through untouched rather than being re-serialised.
@@ -553,7 +727,9 @@ function send(
     // header, or it can serve a gzipped response to a client that never asked
     // for one (or vice versa).
     Vary: 'Accept-Encoding',
-    'Cache-Control': 'no-store',
+    ...(validator
+      ? { ETag: validator.etag, 'Cache-Control': 'no-cache' }
+      : { 'Cache-Control': 'no-store' }),
   });
   res.end(headOnly ? undefined : (compressed ?? payload));
 }

@@ -20,5 +20,5 @@
     "bench:fts-search": "npm run build && node bench/fts-search.bench.js"
   },
   "dependencies": { "@stellar/stellar-sdk": "^17.2.1" },
-  "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.4" }
+  "devDependencies": { "typescript": "^7.0.2", "@types/node": "^26.6.5" }
 }

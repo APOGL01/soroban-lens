@@ -19,6 +19,13 @@ Options:
                       How long to wait for in-flight requests on SIGINT/SIGTERM
                       before dropping them (default: 10000, env LENS_SHUTDOWN_TIMEOUT_MS)
   -h, --help          Show this help.
+
+Access control (all off unless set):
+  LENS_RATE_LIMIT_RPS    Requests per second allowed per client IP (token bucket).
+  LENS_RATE_LIMIT_BURST  Bucket size (default: LENS_RATE_LIMIT_RPS, rounded up).
+  LENS_API_KEYS          Comma-separated API keys; when set, requests must send
+                         X-API-Key or Authorization: Bearer <key>.
+  LENS_TRUST_PROXY       1 to read the client IP from X-Forwarded-For (behind a proxy).
 `;
 
 const { values } = parseArgs({
@@ -48,9 +55,36 @@ const shutdownTimeoutMs = Number(
   values['shutdown-timeout'] ?? process.env.LENS_SHUTDOWN_TIMEOUT_MS ?? 10_000,
 );
 
+const rateLimit = parseRateLimit();
+const apiKeys = (process.env.LENS_API_KEYS ?? '')
+  .split(',')
+  .map((key) => key.trim())
+  .filter((key) => key !== '');
+
+function parseRateLimit(): { requestsPerSecond: number; burst?: number } | undefined {
+  const rawRate = process.env.LENS_RATE_LIMIT_RPS;
+  if (rawRate === undefined || rawRate.trim() === '') return undefined;
+  const requestsPerSecond = Number(rawRate);
+  if (!Number.isFinite(requestsPerSecond) || requestsPerSecond <= 0) {
+    log.error('config', `LENS_RATE_LIMIT_RPS must be a positive number, got "${rawRate}".`);
+    process.exit(1);
+  }
+  const rawBurst = process.env.LENS_RATE_LIMIT_BURST;
+  if (rawBurst === undefined || rawBurst.trim() === '') return { requestsPerSecond };
+  const burst = Number(rawBurst);
+  if (!Number.isFinite(burst) || burst < 1) {
+    log.error('config', `LENS_RATE_LIMIT_BURST must be at least 1, got "${rawBurst}".`);
+    process.exit(1);
+  }
+  return { requestsPerSecond, burst };
+}
+
 const store = new SqliteEventStore({ path: dbPath, log });
 const server = createApiServer({
   store,
+  ...(rateLimit ? { rateLimit } : {}),
+  ...(apiKeys.length > 0 ? { apiKeys } : {}),
+  trustProxy: ['1', 'true'].includes((process.env.LENS_TRUST_PROXY ?? '').toLowerCase()),
   network: process.env.LENS_NETWORK ?? 'testnet',
   ...(values.cors ?? process.env.LENS_CORS_ORIGIN
     ? { corsOrigin: values.cors ?? (process.env.LENS_CORS_ORIGIN as string) }

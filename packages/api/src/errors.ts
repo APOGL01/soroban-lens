@@ -20,8 +20,10 @@ export class ApiError extends Error {
   readonly parameter: string | undefined;
   /** Methods to advertise in `Allow`, which RFC 9110 requires on a 405. */
   readonly allow: string | undefined;
-  /** Seconds to advertise in `Retry-After` on a 503. */
+  /** Seconds to advertise in `Retry-After` on a 429 or 503. */
   retryAfterSeconds: number | undefined;
+  /** Challenge to advertise in `WWW-Authenticate`, which RFC 9110 requires on a 401. */
+  wwwAuthenticate: string | undefined;
 
   constructor(status: number, code: string, message: string, parameter?: string, allow?: string) {
     super(message);
@@ -31,6 +33,7 @@ export class ApiError extends Error {
     this.parameter = parameter;
     this.allow = allow;
     this.retryAfterSeconds = undefined;
+    this.wwwAuthenticate = undefined;
   }
 
   static badRequest(message: string, parameter?: string): ApiError {
@@ -39,6 +42,20 @@ export class ApiError extends Error {
 
   static notFound(message: string): ApiError {
     return new ApiError(404, 'not_found', message);
+  }
+
+  /** No valid API key was presented. */
+  static unauthorized(message: string): ApiError {
+    const error = new ApiError(401, 'unauthorized', message);
+    error.wwwAuthenticate = 'Bearer realm="soroban-lens"';
+    return error;
+  }
+
+  /** The client exhausted its token bucket, with the wait before one token is available. */
+  static tooManyRequests(message: string, retryAfterSeconds: number): ApiError {
+    const error = new ApiError(429, 'rate_limited', message);
+    error.retryAfterSeconds = retryAfterSeconds;
+    return error;
   }
 
   /** Temporarily unable to serve, with the wait a client should honour. */
