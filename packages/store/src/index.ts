@@ -12,6 +12,8 @@ export type {
   EventQuery,
   EventPage,
   ContractSummary,
+  TimeBucket,
+  TimeBucketCount,
   StreamState,
   StoreStats,
   ContractSpecRecord,
