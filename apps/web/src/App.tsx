@@ -93,13 +93,17 @@ export function App(): React.JSX.Element {
     }
   }, [selected.baseUrl, query, nextCursor, loadingMore]);
 
-  // Reset the page whenever the query or the network changes.
+  // When the query or network changes, fetch fresh data but keep the old rows
+  // on screen until the new ones arrive.
   useEffect(() => {
+    if (!contractIdValid) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
-    setEvents([]);
     setNextCursor(null);
     void loadFirstPage();
-  }, [loadFirstPage]);
+  }, [loadFirstPage, contractIdValid]);
 
   // Live updates arrive over SSE; polling is the fallback for whenever the
   // stream is not open (before it connects, while the browser retries a drop,
