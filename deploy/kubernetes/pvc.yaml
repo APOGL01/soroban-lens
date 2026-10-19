@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: soroban-lens-data
+  namespace: soroban-lens
+  labels:
+    app.kubernetes.io/part-of: soroban-lens
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: <your-storage-class>  # Uncomment to override default

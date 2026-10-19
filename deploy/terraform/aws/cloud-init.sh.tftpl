@@ -1,0 +1,120 @@
+#!/bin/bash
+# Bootstrap for a soroban-lens host. Rendered by Terraform, run once as root by
+# cloud-init. Progress and failures: /var/log/soroban-lens-bootstrap.log
+set -euo pipefail
+exec > >(tee -a /var/log/soroban-lens-bootstrap.log) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+echo "bootstrap started $(date -u +%FT%TZ)"
+
+# First boot races unattended-upgrades for the apt lock, and every download
+# can hit a transient network error: retry rather than fail the whole boot.
+retry() {
+  local attempt
+  for attempt in $(seq 1 20); do
+    if "$@"; then
+      return 0
+    fi
+    echo "attempt $attempt failed: $*; retrying in 15s"
+    sleep 15
+  done
+  return 1
+}
+
+# The web and node images build on this host; swap covers the peak on a 2 GB box.
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+retry apt-get update -y
+retry apt-get install -y docker.io docker-compose-v2 git curl
+systemctl enable --now docker
+snap wait system seed.loaded
+retry snap install aws-cli --classic
+export PATH="$PATH:/snap/bin"
+export AWS_DEFAULT_REGION="${region}"
+
+# ---- persistent data volume ------------------------------------------------
+volume_id="${data_volume_id}"
+device="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$(echo "$volume_id" | tr -d '-')"
+echo "waiting for $device"
+for attempt in $(seq 1 60); do
+  [ -e "$device" ] && break
+  sleep 10
+done
+[ -e "$device" ] || { echo "data volume never appeared at $device"; exit 1; }
+
+# Format only a blank volume: on an instance replacement the filesystem and
+# the indexed data on it must be left alone.
+if ! blkid "$device" > /dev/null 2>&1; then
+  mkfs.ext4 -L lens-data "$device"
+fi
+mkdir -p /var/lib/soroban-lens
+uuid="$(blkid -s UUID -o value "$device")"
+grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /var/lib/soroban-lens ext4 defaults,nofail 0 2" >> /etc/fstab
+mountpoint -q /var/lib/soroban-lens || mount /var/lib/soroban-lens
+
+# The images run as the unprivileged node user (uid 1000).
+mkdir -p /var/lib/soroban-lens/data
+chown 1000:1000 /var/lib/soroban-lens/data
+
+# ---- application -----------------------------------------------------------
+retry git clone --depth 1 --branch "${repo_ref}" "${repo_url}" /opt/soroban-lens
+cd /opt/soroban-lens
+
+umask 077
+cat > .env <<'ENV_EOF'
+LENS_NETWORK=${network}
+LENS_CONTRACT_IDS=${contract_ids}
+LENS_WEB_PORT=80
+LENS_API_PORT=8080
+LENS_CORS_ORIGIN=http://${public_ip}
+LENS_WEB_NETWORKS='{"${network}":"http://${public_ip}:8080"}'
+%{ if start_ledger != "" ~}
+LENS_START_LEDGER=${start_ledger}
+%{ endif ~}
+ENV_EOF
+
+# The RPC URL, RPC headers and API keys come from SSM, never from user-data.
+retry bash -c 'aws ssm get-parameter --name "${secrets_parameter}" --with-decryption --query Parameter.Value --output text > /tmp/lens-secrets.env'
+cat /tmp/lens-secrets.env >> .env
+shred -u /tmp/lens-secrets.env || rm -f /tmp/lens-secrets.env
+umask 022
+
+# docker-compose.yml does not forward LENS_RPC_HEADERS or LENS_API_KEYS to the
+# containers, so this override does. It also puts lens-data on the EBS volume
+# and applies the log rotation from docs/operations/log-rotation.md.
+cat > docker-compose.aws.yml <<'COMPOSE_EOF'
+services:
+  doctor:
+    environment:
+      LENS_RPC_HEADERS: $${LENS_RPC_HEADERS:-}
+  indexer:
+    environment:
+      LENS_RPC_HEADERS: $${LENS_RPC_HEADERS:-}
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+  api:
+    environment:
+      LENS_API_KEYS: $${LENS_API_KEYS:-}
+    logging: *logging
+  web:
+    logging: *logging
+
+volumes:
+  lens-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/soroban-lens/data
+COMPOSE_EOF
+
+retry docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --build
+echo "bootstrap finished $(date -u +%FT%TZ)"

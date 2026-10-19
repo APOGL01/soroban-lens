@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: soroban-lens
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - pvc.yaml
+  - indexer-deployment.yaml
+  - api-deployment.yaml
+  - api-hpa.yaml
+  - api-service.yaml
+  - web-deployment.yaml
+  - web-service.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: soroban-lens

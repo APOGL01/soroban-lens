@@ -1,0 +1,79 @@
+name: Benchmarks
+
+# Kept out of ci.yml: the suite seeds a million events and takes minutes, and
+# a performance check must never be what blocks a docs-only fix from going red
+# for an unrelated reason.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Benchmark suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Benchmark this commit
+        run: node bench/run.js --out bench/results/head.json
+
+      # Pull requests are compared against their base commit measured on this
+      # same runner, in this same job. A baseline committed to the repo would
+      # compare numbers from different hardware, which says nothing.
+      - name: Check out the base commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Install and build the base commit
+        if: github.event_name == 'pull_request'
+        working-directory: base
+        run: |
+          npm ci
+          npm run build
+
+      - name: Benchmark the base commit
+        if: github.event_name == 'pull_request'
+        # This commit's harness against the base commit's built packages, so a
+        # PR that adds or changes the harness itself is still compared fairly.
+        run: node bench/run.js --root base --out bench/results/base.json
+
+      - name: Compare against the base (fails on a significant regression)
+        if: github.event_name == 'pull_request'
+        run: node bench/compare.js bench/results/base.json bench/results/head.json --md bench/results/report.md
+
+      - name: Report results
+        if: github.event_name != 'pull_request'
+        run: node bench/compare.js bench/results/head.json --md bench/results/report.md
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.event_name }}-${{ github.sha }}
+          path: bench/results/*.json
+          if-no-files-found: ignore
+          retention-days: 90

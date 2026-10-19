@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: soroban-lens-config
+  namespace: soroban-lens
+  labels:
+    app.kubernetes.io/part-of: soroban-lens
+data:
+  LENS_NETWORK: "testnet"
+  LENS_RPC_URL: ""
+  LENS_CONTRACT_IDS: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+  LENS_START_LEDGER: ""
+  LENS_PAGE_SIZE: "200"
+  LENS_POLL_INTERVAL_MS: "2000"
+  LENS_FETCH_SPECS: "true"
+  LENS_RETRY_ATTEMPTS: "5"
+  LENS_RETRY_BASE_DELAY_MS: "250"
+  LENS_RETRY_MAX_DELAY_MS: "30000"
+  LENS_MAX_QUERY_LIMIT: "1000"
+  LENS_API_PORT: "8080"
+  LENS_CORS_ORIGIN: "*"

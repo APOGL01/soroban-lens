@@ -73,3 +73,10 @@ Images use **Node 26**. The floor is **22.13**, the version where `node:sqlite`
 stopped requiring `--experimental-sqlite` (it was added behind that flag back in
 22.5). Using the built-in driver is what keeps these images free of a native
 build toolchain. CI tests against 22.13 and 24.
+
+## Cloud deploy (Terraform)
+
+`terraform/aws/` is a module that runs the compose stack on one EC2 instance
+with a persistent EBS volume, a dedicated VPC and secrets in SSM Parameter
+Store. `terraform/examples/aws/` is a ready-to-apply root. See
+[`terraform/aws/README.md`](terraform/aws/README.md).
