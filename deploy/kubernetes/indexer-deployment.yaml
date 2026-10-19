@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: soroban-lens-indexer
+  namespace: soroban-lens
+  labels:
+    app.kubernetes.io/name: soroban-lens
+    app.kubernetes.io/component: indexer
+    app.kubernetes.io/part-of: soroban-lens
+spec:
+  replicas: 1  # SQLite single-writer constraint: do not scale > 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: soroban-lens
+      app.kubernetes.io/component: indexer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: soroban-lens
+        app.kubernetes.io/component: indexer
+        app.kubernetes.io/part-of: soroban-lens
+    spec:
+      securityContext:
+        fsGroup: 1000  # node user in the image
+      containers:
+        - name: indexer
+          image: ghcr.io/soroban-forge-labs/soroban-lens-node:latest
+          imagePullPolicy: IfNotPresent
+          command: ["node", "packages/cli/dist/bin.js", "index"]
+          envFrom:
+            - configMapRef:
+                name: soroban-lens-config
+            - secretRef:
+                name: soroban-lens-secret
+          env:
+            - name: LENS_DB_PATH
+              value: "/app/data/lens.db"
+            - name: LENS_DATA_DIR
+              value: "/app/data"
+            - name: NODE_ENV
+              value: "production"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          # No liveness probe: a wedged indexer is still "alive" — the
+          # heartbeat file approach from compose does not map cleanly to k8s.
+          # Use metrics (#1) or log alerting for stall detection.
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - |
+                  const fs = require('fs');
+                  const p = '/app/data/lens.db';
+                  if (!fs.existsSync(p)) process.exit(1);
+                  process.exit(0);
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: soroban-lens-data

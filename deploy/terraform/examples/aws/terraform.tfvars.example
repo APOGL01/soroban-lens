@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+
+region = "us-east-1"
+
+# Required. SDF runs no free public mainnet RPC with useful retention:
+# use your own node or a commercial provider.
+rpc_url = "https://mainnet.sorobanrpc.com"
+
+# Required. The contracts to index.
+contract_ids = ["C...YOUR_CONTRACT_ID"]
+
+# Optional: commercial providers authenticate with headers.
+# rpc_headers = "Authorization: Bearer YOUR_KEY"
+
+# Optional: require X-API-Key or Authorization: Bearer <key> on the API.
+# api_keys = ["at-least-16-characters-long"]
+
+# Strongly recommended: only your own address(es).
+# allowed_cidrs = ["203.0.113.7/32"]
