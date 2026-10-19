@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { SqliteEventStore, LATEST_SCHEMA_VERSION, MAX_QUERY_LIMIT } from '@soroban-lens/store';
-import { createApiServer, MAX_BATCH_IDS } from '../dist/index.js';
+import { createApiServer, shutdownApiServer, MAX_BATCH_IDS } from '../dist/index.js';
 
 /** Whether this process's SQLite build has FTS5 compiled in — see the store's own note for why this can vary. */
 const FTS5_AVAILABLE = (() => {
@@ -1126,6 +1126,124 @@ test('a 405 on a multi-method route lists every method', async () => {
   });
 });
 
+test('?fields= returns only the selected event properties; the default is unchanged', async () => {
+  await withServer(async ({ get }) => {
+    const full = await get(`/contracts/${SAC}/events?limit=5`);
+    const sparse = await get(`/contracts/${SAC}/events?limit=5&fields=id,ledger,topics,value`);
+    assert.equal(sparse.res.status, 200);
+    assert.equal(sparse.body.events.length, full.body.events.length);
+    for (const event of sparse.body.events) {
+      assert.deepEqual(Object.keys(event).sort(), ['id', 'ledger', 'topics', 'value']);
+    }
+    assert.ok('topicsXdr' in full.body.events[0] && 'valueXdr' in full.body.events[0]);
+    assert.ok(JSON.stringify(sparse.body).length < JSON.stringify(full.body).length);
+
+    const one = await get(`/events/${encodeURIComponent(full.body.events[0].id)}?fields=id,txHash`);
+    assert.deepEqual(Object.keys(one.body).sort(), ['id', 'txHash']);
+
+    const batch = await get(`/events?ids=${encodeURIComponent(full.body.events[0].id)}&fields=id`);
+    assert.deepEqual(batch.body.events, [{ id: full.body.events[0].id }]);
+  });
+});
+
+test('?fields= rejects unknown or empty field names', async () => {
+  await withServer(async ({ get }) => {
+    const unknown = await get('/events?fields=id,nope');
+    assert.equal(unknown.res.status, 400);
+    assert.equal(unknown.body.error.parameter, 'fields');
+    const empty = await get('/events?fields=');
+    assert.equal(empty.res.status, 400);
+  });
+});
+
+test('GET /contracts/{id}/activity returns correct counts per bucket', async () => {
+  await withServer(async ({ get }) => {
+    const mine = fixture.events.filter((e) => e.contractId === SAC);
+    const expected = new Map();
+    for (const e of mine) {
+      const start = Math.floor(Date.parse(e.ledgerClosedAt) / 1000 / 3600) * 3600;
+      expected.set(start, (expected.get(start) ?? 0) + 1);
+    }
+
+    const { res, body } = await get(`/contracts/${SAC}/activity?bucket=hour`);
+    assert.equal(res.status, 200);
+    assert.equal(body.contractId, SAC);
+    assert.equal(body.bucket, 'hour');
+    const actual = new Map(body.buckets.map((b) => [Date.parse(b.start) / 1000, b.count]));
+    assert.deepEqual(actual, expected);
+    assert.equal(body.buckets.reduce((n, b) => n + b.count, 0), mine.length);
+    const starts = body.buckets.map((b) => b.start);
+    assert.deepEqual(starts, [...starts].sort());
+  });
+});
+
+test('activity honours from/to and rejects bad parameters', async () => {
+  await withServer(async ({ get }) => {
+    const all = await get(`/contracts/${SAC}/activity?bucket=day`);
+    const first = Date.parse(all.body.buckets[0].start) / 1000;
+
+    const none = await get(`/contracts/${SAC}/activity?bucket=day&to=${first - 1}`);
+    assert.deepEqual(none.body.buckets, []);
+
+    assert.equal((await get(`/contracts/${SAC}/activity?bucket=week`)).res.status, 400);
+    assert.equal((await get(`/contracts/${SAC}/activity?from=2026-09-02&to=2026-09-01`)).res.status, 400);
+    assert.equal((await get(`/contracts/${SAC}/activity?from=garbage`)).res.status, 400);
+    assert.equal((await get('/contracts/nope/activity')).res.status, 400);
+  });
+});
+
+test('shutdownApiServer waits for an in-flight request before resolving', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const realCount = store.getStats.bind(store);
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  let entered;
+  const started = new Promise((resolve) => (entered = resolve));
+  store.getStats = async () => {
+    entered();
+    await gate;
+    return realCount();
+  };
+
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const pending = fetch(`${base}/stats`);
+  await started;
+
+  let shutDown = false;
+  const shutdown = shutdownApiServer(server, { timeoutMs: 5000 }).then((r) => {
+    shutDown = true;
+    return r;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(shutDown, false, 'must not finish while a request is in flight');
+
+  release();
+  const res = await pending;
+  assert.equal(res.status, 200);
+  assert.deepEqual(await shutdown, { forced: false });
+  await store.close();
+});
+
+test('shutdownApiServer drops requests still running after the timeout', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  store.getStats = () => new Promise(() => {});
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  const pending = fetch(`http://127.0.0.1:${server.address().port}/stats`).catch((e) => e);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.deepEqual(await shutdownApiServer(server, { timeoutMs: 100 }), { forced: true });
+  assert.ok((await pending) instanceof Error);
+  await store.close();
+});
+
 // ---------------------------------------------------------------------------
 // CSV export (#41)
 // ---------------------------------------------------------------------------
@@ -1820,6 +1938,24 @@ test('TokenBucketLimiter rejects a nonsensical rate', async () => {
   const { TokenBucketLimiter } = await import('../dist/index.js');
   assert.throws(() => new TokenBucketLimiter({ requestsPerSecond: 0 }), /positive/);
   assert.throws(() => new TokenBucketLimiter({ requestsPerSecond: 1, burst: 0 }), /at least 1/);
+});
+
+test('shutdownApiServer ends open event streams instead of waiting out the timeout', async () => {
+  const store = new SqliteEventStore({ path: ':memory:' });
+  await store.insertEvents(fixture.events);
+  const server = createApiServer({ store });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/events/stream`);
+  assert.equal(res.status, 200);
+  const reader = res.body.getReader();
+
+  const started = Date.now();
+  const result = await shutdownApiServer(server, { timeoutMs: 5000 });
+  assert.deepEqual(result, { forced: false });
+  assert.ok(Date.now() - started < 2000, `shutdown took ${Date.now() - started}ms`);
+  await reader.cancel().catch(() => {});
+  await store.close();
 });
 
 test('a JSON ETag never validates a CSV request for the same URL', async () => {

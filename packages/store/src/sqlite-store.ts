@@ -21,6 +21,8 @@ import type {
   RawEventInput,
   StoreStats,
   StreamState,
+  TimeBucket,
+  TimeBucketCount,
   TopicCount,
 } from './types.js';
 
@@ -455,6 +457,21 @@ export class SqliteEventStore implements EventStore {
       )
       .all(normaliseLimit(limit)) as { topic: string; count: number }[];
     return rows.map((r) => ({ topic: r.topic, count: r.count }));
+  }
+
+  async countByTimeBucket(query: EventQuery, bucket: TimeBucket): Promise<TimeBucketCount[]> {
+    const width = BUCKET_SECONDS[bucket];
+    const where = buildWhere(query);
+    const rows = this.#db
+      .prepare(
+        `SELECT (closed_at_unix / ${width}) * ${width} AS start, COUNT(*) AS count
+         FROM events
+         ${where.clause}
+         GROUP BY start
+         ORDER BY start ASC`,
+      )
+      .all(...where.values) as { start: number; count: number }[];
+    return rows.map((r) => ({ start: r.start, count: r.count }));
   }
 
   /**
@@ -1020,6 +1037,8 @@ function rowToEvent(row: EventRow): LensEvent {
     indexedAt: row.indexed_at,
   };
 }
+
+const BUCKET_SECONDS: Record<TimeBucket, number> = { minute: 60, hour: 3600, day: 86400 };
 
 /** Build the WHERE clause for a query. All conditions are ANDed. */
 function buildWhere(query: EventQuery): { clause: string; values: SqlParam[] } {

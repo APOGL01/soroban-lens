@@ -1,5 +1,5 @@
 import { MAX_QUERY_LIMIT } from '@soroban-lens/store';
-import type { EventQuery } from '@soroban-lens/store';
+import type { EventQuery, TimeBucket } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 
 /** Contract ids are StrKey: 'C' followed by 55 base32 characters. */
@@ -217,4 +217,91 @@ export function parseTopics(params: URLSearchParams): (string | null)[] | undefi
     );
   }
   return topics.map((t) => (t === '*' || t === '' ? null : t));
+}
+
+/** Top-level properties of an event that `?fields=` can select. */
+export const EVENT_FIELDS = [
+  'id',
+  'contractId',
+  'type',
+  'ledger',
+  'ledgerClosedAt',
+  'txHash',
+  'transactionIndex',
+  'operationIndex',
+  'inSuccessfulContractCall',
+  'topics',
+  'topicsXdr',
+  'value',
+  'valueXdr',
+  'decodeError',
+  'indexedAt',
+  'typed',
+] as const;
+
+/**
+ * Parse `?fields=id,ledger,topics` into the event properties to return.
+ *
+ * Returns undefined when absent, which keeps the default (everything) and so
+ * the response unchanged for existing clients. Unknown names are rejected
+ * rather than ignored: a typo would otherwise silently return fewer fields.
+ */
+export function parseFields(params: URLSearchParams): Set<string> | undefined {
+  const raw = params.get('fields');
+  if (raw === null) return undefined;
+
+  const fields = raw
+    .split(',')
+    .map((f) => f.trim())
+    .filter((f) => f !== '');
+  if (fields.length === 0) {
+    throw ApiError.badRequest('"fields" was empty. Omit it to return every field.', 'fields');
+  }
+  const unknown = fields.filter((f) => !(EVENT_FIELDS as readonly string[]).includes(f));
+  if (unknown.length > 0) {
+    throw ApiError.badRequest(
+      `Unknown "fields": ${unknown.join(', ')}. Valid fields: ${EVENT_FIELDS.join(', ')}.`,
+      'fields',
+    );
+  }
+  return new Set(fields);
+}
+
+/** Keep only the selected properties of each event. A no-op when `fields` is undefined. */
+export function selectFields<T extends object>(events: T[], fields: Set<string> | undefined): Partial<T>[] {
+  if (!fields) return events;
+  return events.map(
+    (event) => Object.fromEntries(Object.entries(event).filter(([key]) => fields.has(key))) as Partial<T>,
+  );
+}
+
+const BUCKETS: readonly TimeBucket[] = ['minute', 'hour', 'day'];
+
+export interface ActivityQuery {
+  bucket: TimeBucket;
+  /** Inclusive lower bound, epoch seconds. */
+  from?: number;
+  /** Inclusive upper bound, epoch seconds. */
+  to?: number;
+}
+
+/** Parse `?bucket=hour&from=…&to=…` for the activity endpoint. */
+export function parseActivityQuery(params: URLSearchParams): ActivityQuery {
+  const bucket = params.get('bucket') ?? 'hour';
+  if (!(BUCKETS as readonly string[]).includes(bucket)) {
+    throw ApiError.badRequest(
+      `"bucket" must be one of ${BUCKETS.join(', ')}, got "${bucket}".`,
+      'bucket',
+    );
+  }
+  const from = timeParam(params, 'from');
+  const to = timeParam(params, 'to');
+  if (from !== undefined && to !== undefined && from > to) {
+    throw ApiError.badRequest('"from" must not be after "to".', 'from');
+  }
+  return {
+    bucket: bucket as TimeBucket,
+    ...(from !== undefined ? { from } : {}),
+    ...(to !== undefined ? { to } : {}),
+  };
 }

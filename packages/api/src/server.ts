@@ -19,7 +19,14 @@ import {
 } from '@soroban-lens/store';
 import { ApiError } from './errors.js';
 import { MIN_TOPIC_COLUMNS, eventCsvHeader, eventCsvRow, wantsCsv } from './csv.js';
-import { assertContractId, parseEventQuery, parseIds } from './params.js';
+import {
+  assertContractId,
+  parseActivityQuery,
+  parseEventQuery,
+  parseFields,
+  parseIds,
+  selectFields,
+} from './params.js';
 import { executeGraphQL, type GraphQLOptions } from './graphql.js';
 import { WebhookManager, type WebhookOptions } from './webhooks.js';
 import { ApiKeyAuthenticator } from './auth.js';
@@ -297,12 +304,13 @@ const routes: Route[] = [
     etag: true,
     handler: async ({ params, query, accept, store, specs }) => {
       const contractId = assertContractId(decodeURIComponent(params[0] as string));
+      const fields = parseFields(query);
       const eventQuery = { ...parseEventQuery(query), contractId };
       if (wantsCsv(query, accept)) {
         return { stream: csvExport(store, eventQuery, `${contractId}-events.csv`) };
       }
       const page = await store.queryEvents(eventQuery);
-      const events = await specs.annotate(page.events);
+      const events = selectFields(await specs.annotate(page.events), fields);
       if (page.events.length > 0) return { body: { ...page, events } };
 
       // An empty page is three different situations (#58). Telling them apart
@@ -317,6 +325,34 @@ const routes: Route[] = [
         );
       }
       return { body: { ...page, events, emptyReason: 'no_matching_events' } };
+    },
+  },
+  {
+    // Event counts per time bucket (#53), so "events per hour this week" is one
+    // GROUP BY on closed_at_unix (#24) rather than paging every event.
+    method: 'GET',
+    pattern: /^\/contracts\/([^/]+)\/activity$/,
+    handler: async ({ params, query, store }) => {
+      const contractId = assertContractId(decodeURIComponent(params[0] as string));
+      const { bucket, from, to } = parseActivityQuery(query);
+      const counts = await store.countByTimeBucket(
+        {
+          contractId,
+          ...(from !== undefined ? { fromTime: from } : {}),
+          ...(to !== undefined ? { toTime: to } : {}),
+        },
+        bucket,
+      );
+      return {
+        body: {
+          contractId,
+          bucket,
+          buckets: counts.map((c) => ({
+            start: new Date(c.start * 1000).toISOString(),
+            count: c.count,
+          })),
+        },
+      };
     },
   },
   {
@@ -383,6 +419,7 @@ const routes: Route[] = [
       // round trip rather than N. It short-circuits the filter path entirely,
       // since mixing "these exact events" with "events matching X" has no
       // sensible meaning.
+      const fields = parseFields(query);
       const ids = parseIds(query);
       if (ids) {
         const found = await Promise.all(ids.map((id) => store.getEvent(id)));
@@ -392,7 +429,10 @@ const routes: Route[] = [
         }
         return {
           body: {
-            events: await specs.annotate(found.filter((e): e is NonNullable<typeof e> => e !== null)),
+            events: selectFields(
+              await specs.annotate(found.filter((e): e is NonNullable<typeof e> => e !== null)),
+              fields,
+            ),
             // Reported rather than silently dropped, so a caller can tell
             // "not indexed" from "I typo'd the id".
             missing: ids.filter((_, i) => found[i] === null),
@@ -402,7 +442,7 @@ const routes: Route[] = [
       const eventQuery = parseEventQuery(query);
       if (csv) return { stream: csvExport(store, eventQuery, 'events.csv') };
       const page = await store.queryEvents(eventQuery);
-      return { body: { ...page, events: await specs.annotate(page.events) } };
+      return { body: { ...page, events: selectFields(await specs.annotate(page.events), fields) } };
     },
   },
   {
@@ -427,12 +467,13 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/events\/([^/]+)$/,
-    handler: async ({ params, store, specs }) => {
+    handler: async ({ params, query, store, specs }) => {
       const id = decodeURIComponent(params[0] as string);
+      const fields = parseFields(query);
       const event = await store.getEvent(id);
       if (!event) throw ApiError.notFound(`No indexed event with id "${id}".`);
       const [annotated] = await specs.annotate([event]);
-      return { body: annotated };
+      return { body: selectFields([annotated as object], fields)[0] };
     },
   },
   {
@@ -614,6 +655,59 @@ function packageRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '..');
 }
 
+/** Responses currently being served, per server, so shutdown can wait for them. */
+const inFlight = new WeakMap<Server, Set<ServerResponse>>();
+const draining = new WeakSet<Server>();
+
+export interface ShutdownOptions {
+  /** How long to wait for in-flight requests before dropping them. Default 10000. */
+  timeoutMs?: number;
+}
+
+/**
+ * Stop accepting connections and wait for in-flight requests to finish.
+ *
+ * Requests still running after `timeoutMs` have their connections destroyed so
+ * shutdown cannot hang forever. Resolves only once the server is closed, so
+ * the caller can then close the store without pulling it out from under a
+ * request being served.
+ *
+ * @returns whether the timeout was hit and connections were force-closed.
+ */
+export async function shutdownApiServer(
+  server: Server,
+  options: ShutdownOptions = {},
+): Promise<{ forced: boolean }> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  draining.add(server);
+
+  const closed = new Promise<void>((resolve) => {
+    // The callback also fires with an error when the server was never
+    // listening; either way there is nothing left to wait for.
+    server.close(() => resolve());
+  });
+  // Idle keep-alive connections would otherwise hold close() open until they
+  // time out. Busy ones are left alone and close after their response.
+  server.closeIdleConnections();
+
+  let forced = false;
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      forced = (inFlight.get(server)?.size ?? 0) > 0;
+      server.closeAllConnections();
+      resolve();
+    }, timeoutMs);
+  });
+
+  await Promise.race([closed, timedOut]);
+  clearTimeout(timer);
+  await closed;
+  return { forced };
+}
+
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+
 /** The id a reconnecting EventSource sends, or `?lastEventId=` for a client that cannot set headers. */
 function lastEventId(req: IncomingMessage, query: URLSearchParams): string | undefined {
   const header = req.headers['last-event-id'];
@@ -684,6 +778,8 @@ export function createApiServer(options: ApiServerOptions): Server {
     // any delivery that is sleeping between retries.
     server.on('close', () => webhooks.stop());
   }
+  const active = new Set<ServerResponse>();
+  inFlight.set(server, active);
 
   // An open event stream never ends on its own, so without this `close()` would
   // wait on it forever and a shutdown signal would hang.
@@ -696,6 +792,12 @@ export function createApiServer(options: ApiServerOptions): Server {
   return server;
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    active.add(res);
+    res.once('close', () => active.delete(res));
+    // While draining, tell keep-alive clients to reconnect elsewhere instead of
+    // reusing a connection that is about to go away.
+    if (draining.has(server)) res.setHeader('Connection', 'close');
+
     const started = Date.now();
     // The base is a placeholder; only pathname and search are ever read.
     const url = new URL(req.url ?? '/', 'http://localhost');

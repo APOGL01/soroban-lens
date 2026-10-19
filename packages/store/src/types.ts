@@ -227,6 +227,16 @@ export interface TopicCount {
   count: number;
 }
 
+/** Bucket widths supported by `EventStore.countByTimeBucket`. */
+export type TimeBucket = 'minute' | 'hour' | 'day';
+
+/** Events whose ledger closed in `[start, start + bucket width)`. */
+export interface TimeBucketCount {
+  /** Bucket start, seconds since the epoch, aligned to the bucket width. */
+  start: number;
+  count: number;
+}
+
 export interface StoreStats {
   eventCount: number;
   contractCount: number;

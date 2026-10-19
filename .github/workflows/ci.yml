@@ -90,6 +90,24 @@ jobs:
         # job on a commit that touched nothing. Bump deliberately.
         run: npx --yes @redocly/cli@2.53.2 lint packages/api/openapi.json --format stylish
 
+  client:
+    name: Generated client builds against the spec
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/client
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm install
+      - name: Generate, version-check and build
+        # Drift fails here: a spec change the client wrapper no longer fits is
+        # a type error, and a spec version bump without a client bump is caught
+        # by check-version.
+        run: npm run build
+
   docker:
     name: docker compose builds and serves
     runs-on: ubuntu-latest

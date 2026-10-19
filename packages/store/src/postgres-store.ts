@@ -17,6 +17,8 @@ import type {
   StoreStats,
   StreamState,
   TopicCount,
+  TimeBucket,
+  TimeBucketCount,
 } from './types.js';
 
 /**
@@ -387,6 +389,22 @@ export class PostgresEventStore implements EventStore {
       values,
     );
     return rows.length > 0;
+  }
+
+  async countByTimeBucket(query: EventQuery, bucket: TimeBucket): Promise<TimeBucketCount[]> {
+    const width = { minute: 60, hour: 3600, day: 86400 }[bucket];
+    const where = buildWhere(query);
+    // Integer division on BIGINT floors for the non-negative epochs stored here,
+    // matching the SQLite store's bucket starts exactly.
+    const { rows } = await this.#pool.query(
+      `SELECT (closed_at_unix / ${width}) * ${width} AS start, COUNT(*)::int AS count
+       FROM events
+       ${where.clause}
+       GROUP BY start
+       ORDER BY start ASC`,
+      where.values,
+    );
+    return rows.map((r) => ({ start: Number(r['start']), count: Number(r['count']) }));
   }
 
   async getLatestEventId(): Promise<string | null> {
