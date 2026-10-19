@@ -303,30 +303,76 @@ export class SqliteEventStore implements EventStore {
     }
     const limit = normaliseLimit(query.limit);
     const order = query.order === 'asc' ? 'ASC' : 'DESC';
+    const backward = query.direction === 'backward';
     const where = buildWhere(query);
-    const { total, isEstimate } = this.#countCached(where);
+    const { total, isEstimate } = query.skipTotal
+      ? { total: 0, isEstimate: false }
+      : this.#countCached(where);
 
     // Keyset pagination. The cursor is an event id; because ids are fixed-width
     // and sort chronologically, a plain string comparison is the whole
     // implementation, and inserts behind the cursor cannot shift a page.
+    //
+    // "After" a cursor means greater in ASC order and smaller in DESC order.
+    // Paging backward scans from the cursor against `order` and flips the rows
+    // back afterwards, so the page still reads in `order`.
+    const afterOp = order === 'DESC' ? '<' : '>';
+    const beforeOp = order === 'DESC' ? '>' : '<';
+    const scanOrder = backward ? (order === 'DESC' ? 'ASC' : 'DESC') : order;
     const keyset = query.cursor
-      ? `${where.clause ? 'AND' : 'WHERE'} id ${order === 'DESC' ? '<' : '>'} ?`
+      ? `${where.clause ? 'AND' : 'WHERE'} id ${backward ? beforeOp : afterOp} ?`
       : '';
     const rows = this.#db
       .prepare(
-        `SELECT * FROM events ${where.clause} ${keyset} ORDER BY id ${order} LIMIT ?`,
+        `SELECT * FROM events ${where.clause} ${keyset} ORDER BY id ${scanOrder} LIMIT ?`,
       )
       .all(...where.values, ...(query.cursor ? [query.cursor] : []), limit + 1) as unknown as EventRow[];
 
     const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
+    const scanned = hasMore ? rows.slice(0, limit) : rows;
+    const page = backward ? scanned.reverse() : scanned;
+    const first = page[0]?.id;
+    const last = page.at(-1)?.id;
+
+    // The side the scan was heading towards is known from the extra row; the
+    // side it came from needs one cheap indexed probe for a row beyond the page.
+    const nextCursor = backward
+      ? last !== undefined && this.#existsBeyond(where, afterOp, last)
+        ? last
+        : null
+      : hasMore
+        ? (last ?? null)
+        : null;
+    const prevCursor = backward
+      ? hasMore
+        ? (first ?? null)
+        : null
+      : first !== undefined && this.#existsBeyond(where, beforeOp, first)
+        ? first
+        : null;
 
     return {
       events: page.map(rowToEvent),
-      nextCursor: hasMore ? (page.at(-1)?.id ?? null) : null,
+      nextCursor,
+      prevCursor,
       total,
       ...(isEstimate ? { totalIsEstimate: true as const } : {}),
     };
+  }
+
+  /** Whether any row matching `where` lies on the `op` side of `id`. */
+  #existsBeyond(where: { clause: string; values: SqlParam[] }, op: '<' | '>', id: string): boolean {
+    const row = this.#db
+      .prepare(`SELECT 1 FROM events ${where.clause} ${where.clause ? 'AND' : 'WHERE'} id ${op} ? LIMIT 1`)
+      .get(...where.values, id);
+    return row !== undefined;
+  }
+
+  async getLatestEventId(): Promise<string | null> {
+    const row = this.#db.prepare('SELECT MAX(id) AS id FROM events').get() as unknown as
+      | { id: string | null }
+      | undefined;
+    return row?.id ?? null;
   }
 
   /**

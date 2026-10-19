@@ -51,6 +51,7 @@ export interface LensEvent {
 export interface EventPage {
   events: LensEvent[];
   nextCursor: string | null;
+  prevCursor: string | null;
   total: number;
 }
 

@@ -27,7 +27,7 @@ always emitting.
 - **Topic filter** — type one, or click any topic chip in the table. Known
   topics for the current contract populate a `<datalist>`, so the field
   autocompletes from what has actually been indexed.
-- **Live updates** — polls every 5 seconds, and pauses while the tab is hidden.
+- **Live updates** — streamed over the API's `GET /events/stream` (Server-Sent Events). When the stream is not open — before it connects, while the browser retries a dropped connection, or against an API without it — it falls back to polling every 5 seconds, which pauses while the tab is hidden.
 - **Expandable rows** — click a row for decoded topics and value, plus the raw
   XDR the decoding came from, under a disclosure.
 - **Network switcher** — selects between configured API instances.
