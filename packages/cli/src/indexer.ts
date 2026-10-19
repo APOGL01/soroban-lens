@@ -1,5 +1,5 @@
 import {
-  EventPoller, LensRpcClient, defaultCursorKey, IngestMetrics,
+  EventPoller, LensRpcClient, defaultCursorKey, describeClockSkew, IngestMetrics,
   startMetricsServer, closeMetricsServer, parseMetricsPort,
 } from '@soroban-lens/ingest';
 import { writeFileSync, existsSync } from 'node:fs';
@@ -122,6 +122,21 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
       `indexing ${config.network.name} (${config.network.rpcUrl}) into ${config.dbPath}; ` +
         `${config.contractIds.length || 'all'} contract(s), stream "${cursorKey}"`,
     );
+
+    // A skewed local clock does not stop indexing, it makes every time-based
+    // query misleading (#18) — so it is a warning, and it must not block startup.
+    try {
+      const skew = await client.clockSkew({ thresholdSeconds: config.clockSkewThresholdSeconds });
+      if (skew.exceedsThreshold) {
+        log(
+          `WARNING: ${describeClockSkew(skew)}, beyond the ${skew.thresholdSeconds}s threshold. ` +
+            'fromTime/toTime queries use ledger close time and will be misleading; sync this machine with NTP, ' +
+            'or set LENS_CLOCK_SKEW_THRESHOLD_SECONDS to silence this. Run `lens doctor` for details.',
+        );
+      }
+    } catch (error) {
+      log(`could not check clock skew: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     for await (const batch of poller.stream()) {
       try {

@@ -120,6 +120,20 @@ sidecars even when only reading.
 
 ---
 
+## `lens doctor` warns about clock skew
+
+`ledgerClosedAt` is converted to a Unix timestamp on insert, and `fromTime` /
+`toTime` filter on it, so a local clock that is wrong makes time-based queries
+misleading. `lens doctor` (and the indexer at startup) compare the local clock
+with the latest ledger's close time and warn beyond `LENS_CLOCK_SKEW_THRESHOLD_SECONDS`
+(default 60).
+
+- Sync the machine's clock with NTP (`chrony`, `systemd-timesyncd`, or the host's
+  clock when running in a container).
+- If the clock is right, the RPC node may be lagging the network — a node that
+  is behind looks like a clock that is ahead.
+- Ledgers close about every 5 seconds, so a few seconds of difference is normal.
+
 ## Large numbers look wrong
 
 Decoded integers are **strings**, on purpose:

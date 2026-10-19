@@ -144,7 +144,7 @@ Each has its own directory, README, tests, and a documented interface. See
 | Module | Package | Owner | What it does |
 |---|---|---|---|
 | 1 | [`packages/ingest`](./packages/ingest) | A | Soroban RPC client, polling, retries, cursor tracking, network switching |
-| 2 | [`packages/store`](./packages/store) | B | XDR decoding, schema, migrations, the `EventStore` trait, SQLite backend |
+| 2 | [`packages/store`](./packages/store) | B | XDR decoding, schema, migrations, the `EventStore` trait, SQLite and Postgres backends |
 | 3 | [`packages/api`](./packages/api) | C | HTTP query API + committed OpenAPI spec |
 | 4 | [`apps/web`](./apps/web) | D | Single-page explorer |
 | 5 | [`packages/cli`](./packages/cli), [`deploy/`](./deploy), [`docs/`](./docs) | E | `lens` CLI, `lens doctor`, Docker, docs |
@@ -187,6 +187,7 @@ Every option is documented in [`.env.example`](./.env.example). The essentials:
 | `LENS_API_PORT` | `8080` | |
 | `LENS_WEB_PORT` | `5173` | |
 | `LENS_FETCH_SPECS` | `true` | Look up contract specs for [typed events](#typed-events) |
+| `LENS_CLOCK_SKEW_THRESHOLD_SECONDS` | `60` | `lens doctor` and the indexer warn when the local clock differs from the latest ledger's close time by more than this |
 
 ---
 
@@ -196,8 +197,40 @@ SQLite by default, so anyone can run it locally with zero setup — Node's
 built-in `node:sqlite`, so `npm install` compiles nothing.
 
 The API depends only on the [`EventStore`](./packages/store/src/store.ts)
-interface, never on SQLite. Adding Postgres means writing a second
-implementation of that interface; nothing above it changes.
+interface, never on SQLite, so nothing above Module 2 knows which backend it
+is talking to.
+
+**Postgres** is the second implementation, for several indexers writing
+concurrently or a dataset past a few tens of GB. `topics_json` and `value_json`
+are `JSONB`, with a GIN index on the topics for containment queries. It needs
+the optional peer dependency `pg` (`npm install pg`) and is opened with
+`PostgresEventStore.connect({ connectionString })`. The same conformance suite
+runs against both backends; `docker-compose.postgres.yml` demonstrates it:
+
+```bash
+docker compose -f docker-compose.postgres.yml up --build --abort-on-container-exit
+```
+
+---
+
+## Exporting events as CSV
+
+Both event-list routes (`/events` and `/contracts/{id}/events`) can stream CSV,
+for a spreadsheet or a pandas notebook — send `Accept: text/csv` or add
+`?format=csv`:
+
+```bash
+curl -H 'Accept: text/csv' 'http://localhost:8080/contracts/C.../events' > out.csv
+curl 'http://localhost:8080/events?format=csv&fromTime=2026-01-01' > out.csv
+```
+
+The export is every matching event, streamed a page at a time rather than
+buffered (`limit` caps the total). One row per event, with `topic0..topicN`
+columns and `value` as its JSON text. Large integers are decoded to strings, so
+an `i128` cell is written as a quoted JSON string and a spreadsheet leaves it as
+text; `JSON.parse` of the cell recovers the exact digits. Text topics beginning
+with `=`, `+`, `-` or `@` are prefixed with `'` so a spreadsheet does not run
+them as formulas.
 
 ---
 
@@ -208,6 +241,7 @@ npm install
 npm run build          # all workspaces, in dependency order
 npm test               # all suites — no network required
 npm run typecheck
+npm run test:integration   # opt-in: needs Docker, see below
 ```
 
 Every test runs against `fixtures/testnet-events.json`, real captured testnet

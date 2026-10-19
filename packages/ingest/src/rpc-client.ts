@@ -2,6 +2,7 @@ import { rpc } from '@stellar/stellar-sdk';
 import type { EventBatch, EventFilter, EventType, RawEvent, RetentionState } from './types.js';
 import { withRetry, type RetryOptions } from './retry.js';
 import type { IngestMetrics } from './metrics.js';
+import { measureClockSkew, type ClockSkew } from './clock-skew.js';
 
 export interface RpcClientOptions {
   rpcUrl: string;
@@ -74,6 +75,25 @@ export class LensRpcClient {
   async latestLedger(): Promise<number> {
     const res = await withRetry(() => this.#attempt('getLatestLedger', () => this.#server.getLatestLedger()), this.#retry);
     return res.sequence;
+  }
+
+  /**
+   * Compare the local clock with the latest ledger's close time (#18).
+   *
+   * One attempt, no retry: this is a startup diagnostic, and waiting out a
+   * flaky endpoint to report on it would delay the thing it is warning about.
+   */
+  async clockSkew(options: { thresholdSeconds?: number; now?: () => number } = {}): Promise<ClockSkew> {
+    const latest = await withRetry(
+      () => this.#attempt('getLatestLedger', () => this.#server._getLatestLedger()),
+      { ...this.#retry, attempts: 1 },
+    );
+    return measureClockSkew(
+      latest.sequence,
+      latest.closeTime,
+      (options.now ?? Date.now)(),
+      options.thresholdSeconds,
+    );
   }
 
   /** Current retention window, used to clamp a start ledger into range. */

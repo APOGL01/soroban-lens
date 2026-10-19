@@ -26,7 +26,7 @@ const USAGE = `
 lens — soroban-lens operator CLI
 
 Usage:
-  lens doctor [options]              Preflight: Node, data dir, database, RPC, contract ids.
+  lens doctor [options]              Preflight: Node, data dir, database, RPC, clock skew, contract ids.
   lens index  [options]              Run the indexer (ingest -> decode -> store).
   lens seed   [--fixture <path>]     Load a captured getEvents response (and, by default, its
                                      contracts' specs) into the database.
