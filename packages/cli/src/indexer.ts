@@ -1,5 +1,5 @@
 import {
-  EventPoller, LensRpcClient, defaultCursorKey, describeClockSkew, IngestMetrics,
+  EventPoller, FailoverRpcClient, StellarArchiveSource, buildFilters, defaultCursorKey, describeClockSkew, IngestMetrics,
   startMetricsServer, closeMetricsServer, parseMetricsPort,
 } from '@soroban-lens/ingest';
 import { writeFileSync, existsSync } from 'node:fs';
@@ -74,9 +74,9 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
   const metrics = new IngestMetrics();
 
   const store = new SqliteEventStore({ path: config.dbPath });
-  const client = new LensRpcClient({
+  const client = new FailoverRpcClient({
     metrics,
-    rpcUrl: config.network.rpcUrl,
+    rpcUrls: config.rpcUrls,
     ...(Object.keys(config.rpcHeaders).length > 0 ? { headers: config.rpcHeaders } : {}),
     retry: {
       ...config.retry,
@@ -123,6 +123,17 @@ export async function runIndexer(options: IndexerOptions): Promise<IndexerResult
         `${config.contractIds.length || 'all'} contract(s), stream "${cursorKey}"`,
     );
 
+    if (config.archiveUrl && config.startLedger !== undefined) {
+      const archive = new StellarArchiveSource({ archiveUrl: config.archiveUrl });
+      const retention = await client.retention();
+      const archiveEnd = Math.min(config.startLedger < retention.oldestLedger ? retention.oldestLedger - 1 : 0, retention.latestLedger);
+      if (archiveEnd >= config.startLedger) {
+        log(`backfilling ledgers ${config.startLedger}..${archiveEnd} from archive ${config.archiveUrl}`);
+        const archived = await archive.getEvents({ startLedger: config.startLedger, endLedger: archiveEnd, filters: buildFilters(config.contractIds), limit: 10000 });
+        const added = await store.insertEvents(archived.events);
+        log(`archive backfill: +${added} new of ${archived.events.length} events through ledger ${archiveEnd}`);
+      }
+    }
     // A skewed local clock does not stop indexing, it makes every time-based
     // query misleading (#18) — so it is a warning, and it must not block startup.
     try {

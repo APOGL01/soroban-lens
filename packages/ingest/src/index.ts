@@ -54,3 +54,8 @@ export type { RetryOptions } from './retry.js';
 
 export { IngestMetrics } from './metrics.js';
 export { startMetricsServer, closeMetricsServer, parseMetricsPort } from './metrics-server.js';
+
+export { FailoverRpcClient } from './rpc-pool.js';
+export type { RpcPoolOptions } from './rpc-pool.js';
+export { StellarArchiveSource } from './archive.js';
+export type { ArchiveSourceOptions, ArchiveRange } from './archive.js';
