@@ -18,12 +18,55 @@ export function App(): React.JSX.Element {
   const [networkLabel, setNetworkLabel] = usePersistentState('lens.network', networks[0]!.label);
   const selected = networks.find((n) => n.label === networkLabel) ?? networks[0]!;
 
-  const [filters, setFilters] = usePersistentState<FilterState>('lens.filters', {
-    contractId: '',
-    topic: '',
-    successfulOnly: false,
-    live: true,
-  });
+  // ---------- URL-based shareable state (#63, #68) ----------
+  // On first load, prefer URL search params over localStorage so that a shared
+  // link always wins. After that, keep URL and localStorage in sync.
+  const [filters, setFiltersRaw] = usePersistentState<FilterState>('lens.filters', (() => {
+    const sp = new URLSearchParams(window.location.search);
+    return {
+      contractId: sp.get('contractId') ?? '',
+      topic: sp.get('topic') ?? '',
+      successfulOnly: sp.get('successfulOnly') === 'true',
+      live: sp.has('live') ? sp.get('live') === 'true' : true,
+      fromLedger: sp.get('fromLedger') ?? '',
+      toLedger: sp.get('toLedger') ?? '',
+    };
+  })());
+
+  /** Update filter state and push the new params into the URL bar. */
+  const setFilters = useCallback(
+    (next: FilterState) => {
+      setFiltersRaw(next);
+      const sp = new URLSearchParams();
+      if (next.contractId) sp.set('contractId', next.contractId);
+      if (next.topic) sp.set('topic', next.topic);
+      if (next.successfulOnly) sp.set('successfulOnly', 'true');
+      if (!next.live) sp.set('live', 'false');
+      if (next.fromLedger) sp.set('fromLedger', next.fromLedger);
+      if (next.toLedger) sp.set('toLedger', next.toLedger);
+      const qs = sp.toString();
+      const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+      window.history.pushState(null, '', newUrl);
+    },
+    [setFiltersRaw],
+  );
+
+  // Restore filter state when the user navigates with back/forward.
+  useEffect(() => {
+    const onPopState = (): void => {
+      const sp = new URLSearchParams(window.location.search);
+      setFiltersRaw({
+        contractId: sp.get('contractId') ?? '',
+        topic: sp.get('topic') ?? '',
+        successfulOnly: sp.get('successfulOnly') === 'true',
+        live: sp.has('live') ? sp.get('live') === 'true' : true,
+        fromLedger: sp.get('fromLedger') ?? '',
+        toLedger: sp.get('toLedger') ?? '',
+      });
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [setFiltersRaw]);
 
   const [events, setEvents] = useState<LensEvent[]>([]);
   const [total, setTotal] = useState(0);
@@ -46,21 +89,40 @@ export function App(): React.JSX.Element {
   const debouncedTopic = useDebounced(filters.topic, 300);
 
   const contractIdValid = debouncedContractId === '' || CONTRACT_ID_PATTERN.test(debouncedContractId);
+
+  // Parse ledger bounds: only include when valid non-empty integers.
+  const fromLedgerNum =
+    filters.fromLedger !== '' && /^\d+$/.test(filters.fromLedger)
+      ? parseInt(filters.fromLedger, 10)
+      : undefined;
+  const toLedgerNum =
+    filters.toLedger !== '' && /^\d+$/.test(filters.toLedger)
+      ? parseInt(filters.toLedger, 10)
+      : undefined;
+  // Do not fire a request if the range is inverted.
+  const ledgerRangeValid =
+    fromLedgerNum === undefined ||
+    toLedgerNum === undefined ||
+    fromLedgerNum <= toLedgerNum;
+
   const query = useMemo(
     () => ({
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
+      ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
+      ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
       limit: PAGE_SIZE,
     }),
-    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum],
   );
 
   // Guards against a slow earlier response overwriting a newer one.
   const requestId = useRef(0);
 
   const loadFirstPage = useCallback(async (): Promise<void> => {
-    if (!contractIdValid) return;
+    if (!contractIdValid || !ledgerRangeValid) return;
     const id = ++requestId.current;
     try {
       const page = await api.events(selected.baseUrl, query);
@@ -88,7 +150,7 @@ export function App(): React.JSX.Element {
     } finally {
       if (id === requestId.current) setLoading(false);
     }
-  }, [selected.baseUrl, query, contractIdValid]);
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (!nextCursor || loadingMore) return;
@@ -113,14 +175,14 @@ export function App(): React.JSX.Element {
   // When the query or network changes, fetch fresh data but keep the old rows
   // on screen until the new ones arrive.
   useEffect(() => {
-    if (!contractIdValid) {
+    if (!contractIdValid || !ledgerRangeValid) {
       setLoading(false);
       return;
     }
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
-  }, [loadFirstPage, contractIdValid]);
+  }, [loadFirstPage, contractIdValid, ledgerRangeValid]);
 
   // Live updates arrive over SSE; polling is the fallback for whenever the
   // stream is not open (before it connects, while the browser retries a drop,
