@@ -85,6 +85,15 @@ warning, and a stored cursor that has aged out triggers a restart from
 `oldestLedger` — with a log line saying the gap is unrecoverable from that node,
 because it is. Long backfills need an archive source, not an RPC node.
 
+**A restart checks the window before it fetches.** Every saved cursor carries
+the window the node reported when it was written (`CursorState.retention`). On
+resume the poller compares that with what the node holds now: if the node moved
+its oldest ledger past the saved position, the warning names the lost ledger
+range and the restart that follows, before any `getEvents` call goes out. The
+comparison works without a snapshot — a cursor written before this existed, or
+by a `CursorStore` that does not persist `retention`, is judged by its saved
+ledger alone.
+
 **Retries use full jitter.** `delay = random(0, min(maxDelay, base · 2ⁿ))`.
 Full rather than equal jitter, so several indexers restarting against the same
 node do not resynchronise into a thundering herd.

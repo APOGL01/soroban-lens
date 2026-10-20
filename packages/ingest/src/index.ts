@@ -28,6 +28,9 @@ export {
 } from './clock-skew.js';
 export type { ClockSkew } from './clock-skew.js';
 
+export { compareRetention, describeRetentionGap } from './retention.js';
+export type { RetentionComparison, RetentionSnapshot } from './retention.js';
+
 export { FileCursorStore, MemoryCursorStore } from './cursor.js';
 export type { CursorStore, CursorState } from './cursor.js';
 
