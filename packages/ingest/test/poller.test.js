@@ -65,9 +65,9 @@ test('metrics advance after acknowledgement and include empty-page progress', as
     sleep: async () => abort.abort(),
   }).stream();
   await stream.next();
-  assert.match(metrics.render(), /lens_events_ingested_total 0\n/);
+  assert.doesNotMatch(metrics.render(), /lens_events_ingested_total\{/);
   assert.equal((await stream.next()).done, true);
-  assert.match(metrics.render(), /lens_events_ingested_total 1\n/);
+  assert.match(metrics.render(), /lens_events_ingested_total\{contract="[^"]+"\} 1\n/);
   // The first page's idle callback stops this stream; use an empty bounded run.
   await new EventPoller({ contractIds: [SAC], endLedger: 4697317 }, {
     client: fakeClient([{ events: [], cursor: 'empty' }]), metrics,

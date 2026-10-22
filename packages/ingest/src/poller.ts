@@ -208,7 +208,11 @@ export class EventPoller {
         ledger: lastLedger || batch.latestLedger,
         updatedAt: new Date().toISOString(),
       });
-      this.#metrics?.eventsIngested(fresh.length);
+      if (this.#metrics) {
+        const perContract = new Map<string, number>();
+        for (const e of fresh) perContract.set(e.contractId, (perContract.get(e.contractId) ?? 0) + 1);
+        for (const [id, n] of perContract) this.#metrics.eventsIngested(n, id);
+      }
       this.#metrics?.progress(lastLedger || batch.latestLedger, batch.latestLedger);
 
       cursor = batch.cursor;

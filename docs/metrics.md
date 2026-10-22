@@ -16,7 +16,7 @@ An invalid port or occupied bind address fails startup.
 
 | Metric | Meaning |
 | --- | --- |
-| `lens_events_ingested_total` | Events acknowledged when the consumer requests the next batch and the cursor saves successfully; includes replay across process restarts |
+| `lens_events_ingested_total{contract}` | Per-contract events acknowledged (label cardinality capped at 50 distinct contracts, later ones counted under `contract="other"`; series appear after a contract's first event). Events acknowledged when the consumer requests the next batch and the cursor saves successfully; includes replay across process restarts |
 | `lens_current_ledger` | Last acknowledged page's event ledger; an empty page advances to the reported network tip |
 | `lens_latest_ledger` | Latest ledger reported by that page |
 | `lens_metrics_ready` | 1 after the first acknowledged page; 0 before that |
