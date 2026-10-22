@@ -6,6 +6,7 @@ import { EventTable } from './components/EventTable.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { usePersistentState, usePolling, useDebounced, useEventStream, useTheme } from './hooks.js';
+import { LocaleProvider, useLocale, LOCALE_CODES, LOCALE_LABELS } from './i18n/index.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
 const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'; // XLM SAC
@@ -13,7 +14,10 @@ const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
 
-export function App(): React.JSX.Element {
+// ── Inner app (needs locale context) ──────────────────────────────────────────
+
+function AppInner(): React.JSX.Element {
+  const { t, locale, setLocale } = useLocale();
   const networks = useMemo(configuredNetworks, []);
   const [networkLabel, setNetworkLabel] = usePersistentState('lens.network', networks[0]!.label);
   const selected = networks.find((n) => n.label === networkLabel) ?? networks[0]!;
@@ -208,7 +212,7 @@ export function App(): React.JSX.Element {
       e.contractId,
       e.txHash,
       e.inSuccessfulContractCall,
-      `"${e.topics.map((t) => JSON.stringify(t.value)).join(' | ').replace(/"/g, '""')}"`,
+      `"${e.topics.map((tc) => JSON.stringify(tc.value)).join(' | ').replace(/"/g, '""')}"`,
       `"${JSON.stringify(e.value.value).replace(/"/g, '""')}"`,
     ]);
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
@@ -221,6 +225,31 @@ export function App(): React.JSX.Element {
     URL.revokeObjectURL(url);
   }, [events]);
 
+  // ── Event count line ─────────────────────────────────────────────────────────
+  const suffix = total === 1 ? '' : 's';
+  const eventCountText = (() => {
+    const count = total.toLocaleString();
+    if (query.contractId && debouncedTopic) {
+      return t('eventCountForContractWithTopic', { count, suffix, topic: debouncedTopic });
+    }
+    if (query.contractId) {
+      return t('eventCountForContract', { count, suffix });
+    }
+    if (debouncedTopic) {
+      return t('eventCountWithTopic', { count, suffix, topic: debouncedTopic });
+    }
+    return t('eventCount', { count, suffix });
+  })();
+
+  // ── Empty message ─────────────────────────────────────────────────────────────
+  const emptyMessage = contractUnknown
+    ? t('emptyContractUnknown')
+    : emptyReason === 'no_matching_events'
+      ? t('emptyNoMatchingEvents')
+      : health && health.events === 0
+        ? t('emptyNothingIndexed')
+        : t('emptyNoResults');
+
   return (
     <div className="app">
       <header className="app-header">
@@ -228,17 +257,35 @@ export function App(): React.JSX.Element {
           <h1>
             soroban<span className="accent">-lens</span>
           </h1>
-          <p className="tagline">See what your Soroban contracts are actually emitting.</p>
+          <p className="tagline">{t('tagline')}</p>
         </div>
-        <button
-          type="button"
-          className="theme-toggle"
-          onClick={toggleTheme}
-          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-        >
-          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
-        </button>
+        <div className="header-controls">
+          {/* ── Locale switcher ── */}
+          <div className="locale-switcher">
+            <label htmlFor="locale-select" className="sr-only">{t('language')}</label>
+            <select
+              id="locale-select"
+              value={locale}
+              onChange={(e) => setLocale(e.target.value as typeof locale)}
+              aria-label={t('language')}
+            >
+              {LOCALE_CODES.map((code) => (
+                <option key={code} value={code}>{LOCALE_LABELS[code]}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* ── Theme toggle ── */}
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
+            title={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
+          >
+            {theme === 'dark' ? t('lightMode') : t('darkMode')}
+          </button>
+        </div>
       </header>
 
       <ErrorBoundary title="Status Bar Error">
@@ -262,10 +309,7 @@ export function App(): React.JSX.Element {
       </ErrorBoundary>
 
       {!contractIdValid && (
-        <p className="warning banner">
-          That does not look like a contract id. Expected a StrKey: <code>C</code> followed by
-          55 upper-case letters and digits 2–7.
-        </p>
+        <p className="warning banner">{t('invalidContractId')}</p>
       )}
 
       {error && contractIdValid && (
@@ -276,25 +320,33 @@ export function App(): React.JSX.Element {
 
       <div className="result-meta">
         <div className="result-meta-left">
-          <span>
-            {total.toLocaleString()} event{total === 1 ? '' : 's'}
-            {query.contractId ? ' for this contract' : ' indexed'}
-            {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
-          </span>
-          {filters.live && <span
+          <span>{eventCountText}</span>
+          {filters.live && (
+            <span
               className="live-dot"
-              title={streaming ? 'Streaming live updates' : 'Polling every 5 seconds'}
+              title={streaming ? t('streamingLive') : t('pollingFallback')}
             >
-              live
-            </span>}
+              {t('live')}
+            </span>
+          )}
         </div>
         {events.length > 0 && (
           <div className="export-actions">
-            <button type="button" className="btn-export" onClick={exportJson} title="Export current events as JSON">
-              Export JSON
+            <button
+              type="button"
+              className="btn-export"
+              onClick={exportJson}
+              title={t('exportJsonTitle')}
+            >
+              {t('exportJson')}
             </button>
-            <button type="button" className="btn-export" onClick={exportCsv} title="Export current events as CSV">
-              Export CSV
+            <button
+              type="button"
+              className="btn-export"
+              onClick={exportCsv}
+              title={t('exportCsvTitle')}
+            >
+              {t('exportCsv')}
             </button>
           </div>
         )}
@@ -306,30 +358,37 @@ export function App(): React.JSX.Element {
           showContract={showContract}
           loading={loading}
           onTopicClick={(topic) => setFilters({ ...filters, topic })}
-          emptyMessage={
-            contractUnknown
-              ? 'This contract has not been seen by this indexer. Check the id, and that it is one this instance indexes (LENS_CONTRACT_IDS).'
-              : emptyReason === 'no_matching_events'
-                ? 'This contract is indexed, but no events match these filters.'
-                : health && health.events === 0
-                  ? 'Nothing indexed yet. Start the indexer, or load the fixture with `npm run seed`.'
-                  : 'No events match these filters.'
-          }
+          emptyMessage={emptyMessage}
         />
       </ErrorBoundary>
 
       {nextCursor && (
-        <button type="button" className="load-more" onClick={() => void loadMore()} disabled={loadingMore}>
-          {loadingMore ? 'Loading…' : `Load ${PAGE_SIZE} more`}
+        <button
+          type="button"
+          className="load-more"
+          onClick={() => void loadMore()}
+          disabled={loadingMore}
+        >
+          {loadingMore ? t('loadingMore') : t('loadMore', { count: PAGE_SIZE })}
         </button>
       )}
 
       <footer className="app-footer">
-        <span>Read-only explorer · v0.1</span>
+        <span>{t('footerReadOnly')}</span>
         <a href={`${selected.baseUrl}/openapi.json`} target="_blank" rel="noreferrer">
-          API spec
+          {t('apiSpec')}
         </a>
       </footer>
     </div>
+  );
+}
+
+// ── Public export: wraps the inner app in LocaleProvider ─────────────────────
+
+export function App(): React.JSX.Element {
+  return (
+    <LocaleProvider>
+      <AppInner />
+    </LocaleProvider>
   );
 }
