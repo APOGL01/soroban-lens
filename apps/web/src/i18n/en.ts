@@ -10,8 +10,6 @@ export const en = {
   tagline: 'See what your Soroban contracts are actually emitting.',
   switchToLight: 'Switch to light theme',
   switchToDark: 'Switch to dark theme',
-  lightMode: 'Light mode',
-  darkMode: 'Dark mode',
 
   // ── Locale switcher ──────────────────────────────────────────────────────────
   language: 'Language',
@@ -25,6 +23,10 @@ export const en = {
   live: 'live',
   streamingLive: 'Streaming live updates',
   pollingFallback: 'Polling every 5 seconds',
+  absoluteTime: 'Absolute time',
+  relativeTime: 'Relative time',
+  showAbsoluteTimes: 'Show absolute timestamps',
+  showRelativeTimes: 'Show relative timestamps',
 
   // ── Export ────────────────────────────────────────────────────────────────────
   exportJson: 'Export JSON',
@@ -46,12 +48,12 @@ export const en = {
   emptyNoResults: 'No events match these filters.',
 
   // ── Load more ─────────────────────────────────────────────────────────────────
-  loadMore: 'Load {count} more',
+  loadMore: 'Load more',
   loadingMore: 'Loading\u2026',
 
   // ── Footer ────────────────────────────────────────────────────────────────────
-  footerReadOnly: 'Read-only explorer \u00b7 v0.1',
-  apiSpec: 'API spec',
+  footerTagline: 'Soroban Lens \u2014 a reading lens for Soroban contract events.',
+  sourceLink: 'Source',
 
   // ── StatusBar ─────────────────────────────────────────────────────────────────
   networkLabel: 'Network',
@@ -75,6 +77,8 @@ export const en = {
   liveUpdates: 'Live updates',
 
   // ── EventTable column headers ─────────────────────────────────────────────────
+  expandDetails: 'Expand event details',
+  collapseDetails: 'Collapse event details',
   colExpand: 'Expand',
   colLedger: 'Ledger',
   colContract: 'Contract',

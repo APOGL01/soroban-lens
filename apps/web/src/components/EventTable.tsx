@@ -9,10 +9,12 @@ interface Props {
   onTopicClick: (topic: string) => void;
   loading: boolean;
   emptyMessage: string;
+  /** Whether the Ledger column shows absolute time instead of relative. */
+  absolute: boolean;
 }
 
 export function EventTable({
-  events, showContract, onTopicClick, loading, emptyMessage,
+  events, showContract, onTopicClick, loading, emptyMessage, absolute,
 }: Props): React.JSX.Element {
   const { t } = useLocale();
 
@@ -43,6 +45,7 @@ export function EventTable({
             event={event}
             showContract={showContract}
             onTopicClick={onTopicClick}
+            absolute={absolute}
           />
         ))}
       </tbody>

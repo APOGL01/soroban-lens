@@ -9,7 +9,7 @@ import { usePersistentState, usePolling, useDebounced, useEventStream, useTheme 
 import { LocaleProvider, useLocale, LOCALE_CODES, LOCALE_LABELS } from './i18n/index.js';
 
 /** Testnet Stellar Asset Contract for native XLM — always emitting events. */
-const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC'; // XLM SAC
+const EXAMPLE_CONTRACT = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMPQVUU2HHGCYSC'; // XLM SAC
 const PAGE_SIZE = 50;
 const LIVE_INTERVAL_MS = 5000;
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
@@ -22,12 +22,55 @@ function AppInner(): React.JSX.Element {
   const [networkLabel, setNetworkLabel] = usePersistentState('lens.network', networks[0]!.label);
   const selected = networks.find((n) => n.label === networkLabel) ?? networks[0]!;
 
-  const [filters, setFilters] = usePersistentState<FilterState>('lens.filters', {
-    contractId: '',
-    topic: '',
-    successfulOnly: false,
-    live: true,
-  });
+  // ---------- URL-based shareable state (#63, #68) ----------
+  // On first load, prefer URL search params over localStorage so that a shared
+  // link always wins. After that, keep URL and localStorage in sync.
+  const [filters, setFiltersRaw] = usePersistentState<FilterState>('lens.filters', (() => {
+    const sp = new URLSearchParams(window.location.search);
+    return {
+      contractId: sp.get('contractId') ?? '',
+      topic: sp.get('topic') ?? '',
+      successfulOnly: sp.get('successfulOnly') === 'true',
+      live: sp.has('live') ? sp.get('live') === 'true' : true,
+      fromLedger: sp.get('fromLedger') ?? '',
+      toLedger: sp.get('toLedger') ?? '',
+    };
+  })());
+
+  /** Update filter state and push the new params into the URL bar. */
+  const setFilters = useCallback(
+    (next: FilterState) => {
+      setFiltersRaw(next);
+      const sp = new URLSearchParams();
+      if (next.contractId) sp.set('contractId', next.contractId);
+      if (next.topic) sp.set('topic', next.topic);
+      if (next.successfulOnly) sp.set('successfulOnly', 'true');
+      if (!next.live) sp.set('live', 'false');
+      if (next.fromLedger) sp.set('fromLedger', next.fromLedger);
+      if (next.toLedger) sp.set('toLedger', next.toLedger);
+      const qs = sp.toString();
+      const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+      window.history.pushState(null, '', newUrl);
+    },
+    [setFiltersRaw],
+  );
+
+  // Restore filter state when the user navigates with back/forward.
+  useEffect(() => {
+    const onPopState = (): void => {
+      const sp = new URLSearchParams(window.location.search);
+      setFiltersRaw({
+        contractId: sp.get('contractId') ?? '',
+        topic: sp.get('topic') ?? '',
+        successfulOnly: sp.get('successfulOnly') === 'true',
+        live: sp.has('live') ? sp.get('live') === 'true' : true,
+        fromLedger: sp.get('fromLedger') ?? '',
+        toLedger: sp.get('toLedger') ?? '',
+      });
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [setFiltersRaw]);
 
   const [events, setEvents] = useState<LensEvent[]>([]);
   const [total, setTotal] = useState(0);
@@ -44,27 +87,49 @@ function AppInner(): React.JSX.Element {
   const [contractUnknown, setContractUnknown] = useState(false);
   const [emptyReason, setEmptyReason] = useState<'no_matching_events' | null>(null);
   const [theme, toggleTheme] = useTheme();
+  // Absolute vs relative timestamps in the Ledger column. Persisted so the
+  // choice survives a reload, like the theme.
+  const [absoluteTime, setAbsoluteTime] = usePersistentState('lens.absoluteTime', false);
 
   // Typing a 56-character contract id should not fire 56 requests.
   const debouncedContractId = useDebounced(filters.contractId, 300);
   const debouncedTopic = useDebounced(filters.topic, 300);
 
   const contractIdValid = debouncedContractId === '' || CONTRACT_ID_PATTERN.test(debouncedContractId);
+
+  // Parse ledger bounds: only include when valid non-empty integers.
+  const fromLedgerNum =
+    filters.fromLedger !== '' && /^\d+$/.test(filters.fromLedger)
+      ? parseInt(filters.fromLedger, 10)
+      : undefined;
+  const toLedgerNum =
+    filters.toLedger !== '' && /^\d+$/.test(filters.toLedger)
+      ? parseInt(filters.toLedger, 10)
+      : undefined;
+  // Do not fire a request if the range is inverted.
+  const ledgerRangeValid =
+    fromLedgerNum === undefined ||
+    toLedgerNum === undefined ||
+    fromLedgerNum <= toLedgerNum;
+
   const query = useMemo(
     () => ({
       ...(contractIdValid && debouncedContractId ? { contractId: debouncedContractId } : {}),
       ...(debouncedTopic ? { topics: [debouncedTopic] } : {}),
       ...(filters.successfulOnly ? { successfulOnly: true } : {}),
+      ...(fromLedgerNum !== undefined ? { fromLedger: fromLedgerNum } : {}),
+      ...(toLedgerNum !== undefined ? { toLedger: toLedgerNum } : {}),
       limit: PAGE_SIZE,
     }),
-    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contractIdValid, debouncedContractId, debouncedTopic, filters.successfulOnly, fromLedgerNum, toLedgerNum],
   );
 
   // Guards against a slow earlier response overwriting a newer one.
   const requestId = useRef(0);
 
   const loadFirstPage = useCallback(async (): Promise<void> => {
-    if (!contractIdValid) return;
+    if (!contractIdValid || !ledgerRangeValid) return;
     const id = ++requestId.current;
     try {
       const page = await api.events(selected.baseUrl, query);
@@ -92,7 +157,7 @@ function AppInner(): React.JSX.Element {
     } finally {
       if (id === requestId.current) setLoading(false);
     }
-  }, [selected.baseUrl, query, contractIdValid]);
+  }, [selected.baseUrl, query, contractIdValid, ledgerRangeValid]);
 
   const loadMore = useCallback(async (): Promise<void> => {
     if (!nextCursor || loadingMore) return;
@@ -117,14 +182,14 @@ function AppInner(): React.JSX.Element {
   // When the query or network changes, fetch fresh data but keep the old rows
   // on screen until the new ones arrive.
   useEffect(() => {
-    if (!contractIdValid) {
+    if (!contractIdValid || !ledgerRangeValid) {
       setLoading(false);
       return;
     }
     setLoading(true);
     setNextCursor(null);
     void loadFirstPage();
-  }, [loadFirstPage, contractIdValid]);
+  }, [loadFirstPage, contractIdValid, ledgerRangeValid]);
 
   // Live updates arrive over SSE; polling is the fallback for whenever the
   // stream is not open (before it connects, while the browser retries a drop,
@@ -216,7 +281,7 @@ function AppInner(): React.JSX.Element {
       `"${JSON.stringify(e.value.value).replace(/"/g, '""')}"`,
     ]);
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob([csvSontent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -251,11 +316,11 @@ function AppInner(): React.JSX.Element {
         : t('emptyNoResults');
 
   return (
-    <div className="app">
+    <main className="app">
       <header className="app-header">
         <div>
           <h1>
-            soroban<span className="accent">-lens</span>
+            soroban <span className="accent">-</span>lens
           </h1>
           <p className="tagline">{t('tagline')}</p>
         </div>
@@ -280,10 +345,9 @@ function AppInner(): React.JSX.Element {
             type="button"
             className="theme-toggle"
             onClick={toggleTheme}
-            aria-label={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
             title={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
           >
-            {theme === 'dark' ? t('lightMode') : t('darkMode')}
+            {theme === 'dark' ? t('switchToLight') : t('switchToDark')}
           </button>
         </div>
       </header>
@@ -320,7 +384,7 @@ function AppInner(): React.JSX.Element {
 
       <div className="result-meta">
         <div className="result-meta-left">
-          <span>{eventCountText}</span>
+          <span aria-live="polite" aria-atomic="true">{eventCountText}</span>
           {filters.live && (
             <span
               className="live-dot"
@@ -332,6 +396,14 @@ function AppInner(): React.JSX.Element {
         </div>
         {events.length > 0 && (
           <div className="export-actions">
+            <button
+              type="button"
+              className="btn-export"
+              onClick={() => setAbsoluteTime(!absoluteTime)}
+              title={absoluteTime ? t('showRelativeTimes') : t('showAbsoluteTimes')}
+            >
+              {absoluteTime ? t('relativeTime') : t('absoluteTime')}
+            </button>
             <button
               type="button"
               className="btn-export"
@@ -358,6 +430,7 @@ function AppInner(): React.JSX.Element {
           showContract={showContract}
           loading={loading}
           onTopicClick={(topic) => setFilters({ ...filters, topic })}
+          absolute={absoluteTime}
           emptyMessage={emptyMessage}
         />
       </ErrorBoundary>
@@ -369,17 +442,15 @@ function AppInner(): React.JSX.Element {
           onClick={() => void loadMore()}
           disabled={loadingMore}
         >
-          {loadingMore ? t('loadingMore') : t('loadMore', { count: PAGE_SIZE })}
+          {loadingMore ? t('loadingMore') : t('loadMore')}
         </button>
       )}
 
       <footer className="app-footer">
-        <span>{t('footerReadOnly')}</span>
-        <a href={`${selected.baseUrl}/openapi.json`} target="_blank" rel="noreferrer">
-          {t('apiSpec')}
-        </a>
+        <span>{t('footerTagline')}</span>
+        <a href="https://github.com/soroban-forge-labs/soroban-lens">{t('sourceLink')}</a>
       </footer>
-    </div>
+    </main>
   );
 }
 

@@ -11,8 +11,6 @@ export const es: Partial<Catalogue> = {
   tagline: 'Mira lo que tus contratos Soroban están emitiendo.',
   switchToLight: 'Cambiar a tema claro',
   switchToDark: 'Cambiar a tema oscuro',
-  lightMode: 'Modo claro',
-  darkMode: 'Modo oscuro',
 
   language: 'Idioma',
 
@@ -24,6 +22,10 @@ export const es: Partial<Catalogue> = {
   live: 'en vivo',
   streamingLive: 'Recibiendo actualizaciones en tiempo real',
   pollingFallback: 'Actualizando cada 5 segundos',
+  absoluteTime: 'Hora absoluta',
+  relativeTime: 'Hora relativa',
+  showAbsoluteTimes: 'Mostrar marcas de tiempo absolutas',
+  showRelativeTimes: 'Mostrar marcas de tiempo relativas',
 
   exportJson: 'Exportar JSON',
   exportCsv: 'Exportar CSV',
@@ -42,11 +44,11 @@ export const es: Partial<Catalogue> = {
     'Nada indexado a\u00fan. Inicia el indexador o carga el fixture con `npm run seed`.',
   emptyNoResults: 'Ning\u00fan evento coincide con estos filtros.',
 
-  loadMore: 'Cargar {count} m\u00e1s',
+  loadMore: 'Cargar m\u00e1s',
   loadingMore: 'Cargando\u2026',
 
-  footerReadOnly: 'Explorador de solo lectura \u00b7 v0.1',
-  apiSpec: 'Especificaci\u00f3n API',
+  footerTagline: 'Soroban Lens \u2014 una lente de lectura para los eventos de contratos Soroban.',
+  sourceLink: 'C\u00f3digo fuente',
 
   networkLabel: 'Red',
   connected: 'conectado',
@@ -65,6 +67,8 @@ export const es: Partial<Catalogue> = {
   successfulOnly: 'Solo llamadas exitosas',
   liveUpdates: 'Actualizaciones en vivo',
 
+  expandDetails: 'Expandir detalles del evento',
+  collapseDetails: 'Contraer detalles del evento',
   colExpand: 'Expandir',
   colLedger: 'Ledger',
   colContract: 'Contrato',

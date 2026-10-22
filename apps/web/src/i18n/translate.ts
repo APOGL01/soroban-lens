@@ -12,7 +12,7 @@ import { en, type Catalogue } from './en.js';
  * `{placeholder}` tokens in the resulting string.
  *
  * @example
- *   translate(en, 'loadMore', { count: 50 })  // → "Load 50 more"
+ *   translate(en, 'eventCount', { count: 50, suffix: 's' })  // → "50 events"
  */
 export function translate(
   catalogue: Partial<Catalogue>,
