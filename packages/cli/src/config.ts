@@ -3,6 +3,8 @@ import { resolveClockSkewThreshold, resolveNetwork, type NetworkConfig } from '@
 /** Everything the CLI needs, resolved from flags then environment then defaults. */
 export interface LensConfig {
   network: NetworkConfig;
+  rpcUrls: string[];
+  archiveUrl: string | undefined;
   contractIds: string[];
   dbPath: string;
   dataDir: string;
@@ -29,6 +31,8 @@ export interface LensConfig {
 export interface ConfigOverrides {
   network?: string | undefined;
   rpcUrl?: string | undefined;
+  rpcUrls?: string[] | undefined;
+  archiveUrl?: string | undefined;
   contracts?: string[] | undefined;
   db?: string | undefined;
   dataDir?: string | undefined;
@@ -59,8 +63,10 @@ export function resolveConfig(
   return {
     network: resolveNetwork(
       overrides.network ?? env.LENS_NETWORK ?? 'testnet',
-      overrides.rpcUrl ?? env.LENS_RPC_URL,
+      (overrides.rpcUrls ?? splitList(overrides.rpcUrl ?? env.LENS_RPC_URL))[0],
     ),
+    rpcUrls: (overrides.rpcUrls ?? splitList(env.LENS_RPC_URLS || overrides.rpcUrl || env.LENS_RPC_URL)).length > 0 ? (overrides.rpcUrls ?? splitList(env.LENS_RPC_URLS || overrides.rpcUrl || env.LENS_RPC_URL)) : [resolveNetwork(overrides.network ?? env.LENS_NETWORK ?? 'testnet').rpcUrl],
+    archiveUrl: overrides.archiveUrl ?? env.LENS_ARCHIVE_URL,
     contractIds,
     dbPath: overrides.db ?? env.LENS_DB_PATH ?? './data/lens.db',
     dataDir: overrides.dataDir ?? env.LENS_DATA_DIR ?? './data',

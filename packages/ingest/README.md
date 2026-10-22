@@ -129,3 +129,10 @@ Metrics are disabled by default. For embedded consumers, pass the same
 endpoint with `startMetricsServer` and `closeMetricsServer`.
 See [monitoring documentation](../../docs/metrics.md) for metric semantics,
 a Prometheus scrape configuration, and sample lag alerts.
+
+
+### Historical archives and RPC failover
+
+Set `LENS_RPC_URLS` to a comma-separated, ordered list of Soroban RPC endpoints. The indexer health-checks the active endpoint, fails over after repeated errors, probes the primary for recovery, and retries a provider-local cursor before overlapping from the last committed ledger. This keeps the cursor in the shared store while avoiding an assumption that opaque cursors are portable between nodes.
+
+Set `LENS_ARCHIVE_URL` to a Stellar history archive root when a start ledger predates RPC retention. The CLI backfills the archived range before starting the live RPC tail. `lens doctor` reports the archive coverage separately from each RPC provider.

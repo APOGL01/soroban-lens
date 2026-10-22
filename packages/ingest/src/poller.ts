@@ -1,4 +1,5 @@
 import { buildFilters, MAX_PAGE_SIZE, type LensRpcClient } from './rpc-client.js';
+import type { FailoverRpcClient } from './rpc-pool.js';
 import { assertContractIds } from './contract-id.js';
 import { MemoryCursorStore, type CursorStore } from './cursor.js';
 import { sleep as defaultSleep } from './retry.js';
@@ -6,7 +7,7 @@ import type { EventBatch, PollerOptions } from './types.js';
 import type { IngestMetrics } from './metrics.js';
 
 export interface PollerDeps {
-  client: LensRpcClient;
+  client: LensRpcClient | FailoverRpcClient;
   cursors?: CursorStore;
   /** Stable id for the stream's saved position. Defaults to a hash of the config. */
   cursorKey?: string;
@@ -66,7 +67,7 @@ export function ingestionLag(ledger: number, latestLedger: number): {
  * replay is harmless.
  */
 export class EventPoller {
-  readonly #client: LensRpcClient;
+  readonly #client: LensRpcClient | FailoverRpcClient;
   readonly #cursors: CursorStore;
   readonly #key: string;
   readonly #sleep: (ms: number) => Promise<void>;
@@ -142,7 +143,7 @@ export class EventPoller {
           filters,
           limit: pageSize,
           ...(endLedger !== undefined ? { endLedger } : {}),
-          ...(cursor ? { cursor } : { startLedger: startLedger as number }),
+          ...(cursor ? { cursor, fallbackLedger: startLedger ?? (await this.#cursors.load(this.#key))?.ledger } : { startLedger: startLedger as number }),
         });
       } catch (error) {
         // A cursor can fall out of the retention window if the indexer was off
