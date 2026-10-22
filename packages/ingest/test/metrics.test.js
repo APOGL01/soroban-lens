@@ -13,6 +13,11 @@ test('metrics start at zero and accumulate counters independently', () => {
   metrics.progress(10, 20);
   assert.match(metrics.render(), /lens_current_ledger 10\n/);
   assert.match(metrics.render(), /lens_latest_ledger 20\n/);
+  assert.match(metrics.render(), /lens_rpc_stalled 0\n/);
+  metrics.rpcStalled(true);
+  assert.match(metrics.render(), /lens_rpc_stalled 1\n/);
+  metrics.rpcStalled(false);
+  assert.match(metrics.render(), /lens_rpc_stalled 0\n/);
   assert.match(metrics.render(), /lens_metrics_ready 1\n/);
   assert.match(new IngestMetrics().render(), /lens_events_ingested_total 0\n/);
 });

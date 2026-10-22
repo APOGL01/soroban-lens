@@ -112,6 +112,7 @@ larger sets across multiple filters automatically.
 | `--start-ledger` | — | oldest retained ledger |
 | `--page-size` | — | `200` (max `10000`) |
 | `--poll-interval` | — | `2000` ms |
+| `--stalled-threshold` | `LENS_STALLED_THRESHOLD_MS` | `60000` ms |
 | `--once` | — | off — exit once caught up |
 | `--no-resume` | — | off — ignore stored cursors |
 | `--max-events` | — | unlimited |

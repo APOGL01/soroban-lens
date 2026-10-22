@@ -13,6 +13,8 @@ export interface PollerDeps {
   /** Stable id for the stream's saved position. Defaults to a hash of the config. */
   cursorKey?: string;
   sleep?: (ms: number) => Promise<void>;
+  /** Clock used to track how long the RPC tip remains unchanged. */
+  now?: () => number;
   /** Set to stop the generator cleanly. */
   signal?: AbortSignal;
   log?: (message: string) => void;
@@ -26,6 +28,7 @@ export interface PollerDeps {
  * estimate everywhere it is surfaced.
  */
 export const APPROX_LEDGER_SECONDS = 5;
+export const DEFAULT_STALLED_THRESHOLD_MS = 60_000;
 
 /** Emitted alongside batches so callers can show progress without extra RPC calls. */
 export interface PollerProgress {
@@ -72,6 +75,7 @@ export class EventPoller {
   readonly #cursors: CursorStore;
   readonly #key: string;
   readonly #sleep: (ms: number) => Promise<void>;
+  readonly #now: () => number;
   readonly #signal: AbortSignal | undefined;
   readonly #log: (message: string) => void;
   readonly #options: PollerOptions;
@@ -86,6 +90,7 @@ export class EventPoller {
     this.#cursors = deps.cursors ?? new MemoryCursorStore();
     this.#key = deps.cursorKey ?? defaultCursorKey(deps.client.rpcUrl, options.contractIds);
     this.#sleep = deps.sleep ?? defaultSleep;
+    this.#now = deps.now ?? Date.now;
     this.#signal = deps.signal;
     this.#log = deps.log ?? (() => {});
     this.#metrics = deps.metrics;
@@ -164,6 +169,11 @@ export class EventPoller {
     // here so "at least once" is not every consumer's problem to solve.
     const seen = new RecentIds(pageSize * RECENT_ID_WINDOW_PAGES);
 
+    let observedLatestLedger: number | undefined;
+    let latestLedgerUnchangedSince: number | undefined;
+    let stallReported = false;
+    const stalledThresholdMs = this.#options.stalledThresholdMs ?? DEFAULT_STALLED_THRESHOLD_MS;
+
     const endLedger = this.#options.endLedger;
     let { cursor, startLedger } = await this.#resolveStart();
 
@@ -193,6 +203,26 @@ export class EventPoller {
           continue;
         }
         throw error;
+      }
+
+      const now = this.#now();
+      if (observedLatestLedger === undefined || batch.latestLedger !== observedLatestLedger) {
+        observedLatestLedger = batch.latestLedger;
+        latestLedgerUnchangedSince = now;
+        stallReported = false;
+        this.#metrics?.rpcStalled(false);
+      } else if (
+        !stallReported &&
+        latestLedgerUnchangedSince !== undefined &&
+        now - latestLedgerUnchangedSince >= stalledThresholdMs
+      ) {
+        const stalledSeconds = Math.floor((now - latestLedgerUnchangedSince) / 1000);
+        this.#log(
+          `RPC latest ledger has not advanced beyond ${batch.latestLedger} for ${stalledSeconds}s; ` +
+            'the node may be stalled.',
+        );
+        this.#metrics?.rpcStalled(true);
+        stallReported = true;
       }
 
       // caughtUp reflects what the RPC returned, not what survived dedup: a

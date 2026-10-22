@@ -89,6 +89,42 @@ test('metrics count retention recovery once', async () => {
   assert.match(metrics.render(), /lens_cursor_restarts_total 1\n/);
 });
 
+test('a fixed RPC tip warns once after the threshold and clears on advancement', async () => {
+  const controller = new AbortController();
+  const metrics = new IngestMetrics();
+  const logs = [];
+  const snapshots = [];
+  let now = 0;
+  const client = fakeClient([
+    { events: [], cursor: 'one', latestLedger: 4697317 },
+    { events: [], cursor: 'two', latestLedger: 4697317 },
+    { events: [], cursor: 'three', latestLedger: 4697317 },
+    { events: [], cursor: 'four', latestLedger: 4697317 },
+    { events: [], cursor: 'five', latestLedger: 4697318 },
+  ]);
+  const poller = new EventPoller({
+    contractIds: [SAC], pollIntervalMs: 10, stalledThresholdMs: 20,
+  }, {
+    client,
+    metrics,
+    signal: controller.signal,
+    log: (message) => logs.push(message),
+    now: () => now,
+    sleep: async (ms) => {
+      snapshots.push(metrics.render());
+      now += ms;
+      if (now >= 50) controller.abort();
+    },
+  });
+
+  for await (const _batch of poller.stream()) {}
+
+  assert.equal(logs.filter((message) => message.includes('may be stalled')).length, 1);
+  assert.match(snapshots[2], /lens_rpc_stalled 1\n/);
+  assert.match(snapshots[3], /lens_rpc_stalled 1\n/);
+  assert.match(snapshots[4], /lens_rpc_stalled 0\n/);
+});
+
 test('buildFilters chunks contract ids into groups of five', () => {
   const ids = Array.from({ length: 12 }, (_, i) => `C${i}`);
   const filters = buildFilters(ids);
