@@ -222,7 +222,7 @@ export function App(): React.JSX.Element {
   }, [events]);
 
   return (
-    <div className="app">
+    <main className="app">
       <header className="app-header">
         <div>
           <h1>
@@ -234,10 +234,9 @@ export function App(): React.JSX.Element {
           type="button"
           className="theme-toggle"
           onClick={toggleTheme}
-          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
           title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
         >
-          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          {theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
         </button>
       </header>
 
@@ -276,7 +275,7 @@ export function App(): React.JSX.Element {
 
       <div className="result-meta">
         <div className="result-meta-left">
-          <span>
+          <span aria-live="polite" aria-atomic="true">
             {total.toLocaleString()} event{total === 1 ? '' : 's'}
             {query.contractId ? ' for this contract' : ' indexed'}
             {debouncedTopic ? ` with topic "${debouncedTopic}"` : ''}
@@ -330,6 +329,6 @@ export function App(): React.JSX.Element {
           API spec
         </a>
       </footer>
-    </div>
+    </main>
   );
 }
