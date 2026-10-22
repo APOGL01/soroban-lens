@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileCursorStore, MemoryCursorStore, defaultCursorKey } from '../dist/index.js';
@@ -35,6 +35,17 @@ test('FileCursorStore treats a cleared or empty file as no cursor', async () => 
   await store.save('k', state('abc', 1));
   await store.clear('k');
   assert.equal(await store.load('k'), null);
+  await assert.rejects(readFile(join(dir, 'k.cursor.json'), 'utf8'), { code: 'ENOENT' });
+});
+
+test('FileCursorStore removes orphaned temp files when constructed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cursor-'));
+  const tempName = 'k.cursor.json.999999999.tmp';
+  await writeFile(join(dir, tempName), 'partial', 'utf8');
+
+  const store = new FileCursorStore(dir);
+  assert.equal(await store.load('k'), null);
+  assert.ok(!(await readdir(dir)).includes(tempName));
 });
 
 test('FileCursorStore sanitises keys into safe filenames', async () => {

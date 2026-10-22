@@ -8,6 +8,7 @@ export class IngestMetrics {
   #restarts = 0;
   #ledger = 0;
   #latest = 0;
+  #stalled = false;
   #ready = false;
   #durations = new Map<RpcMethod, Histogram>();
   #errors = new Map<string, number>();
@@ -43,6 +44,8 @@ export class IngestMetrics {
     this.#ready = true;
   }
 
+  rpcStalled(stalled: boolean): void { this.#stalled = stalled; }
+
   render(): string {
     return [
       '# HELP lens_events_ingested_total Events acknowledged by the consumer, including replay.',
@@ -57,6 +60,9 @@ export class IngestMetrics {
       '# HELP lens_latest_ledger Latest ledger reported by the RPC node.',
       '# TYPE lens_latest_ledger gauge',
       `lens_latest_ledger ${this.#latest}`,
+      '# HELP lens_rpc_stalled Whether the RPC node tip has stopped advancing beyond the configured threshold.',
+      '# TYPE lens_rpc_stalled gauge',
+      `lens_rpc_stalled ${Number(this.#stalled)}`,
       '# HELP lens_metrics_ready Whether a page has been acknowledged.',
       '# TYPE lens_metrics_ready gauge',
       `lens_metrics_ready ${Number(this.#ready)}`,
