@@ -167,6 +167,9 @@ test('the cursor is persisted after each page', async () => {
   const saved = await cursors.load('k');
   assert.equal(saved.cursor, 'cur-1', 'cursor advances only once the consumer pulls the next page');
   assert.equal(saved.ledger, 4695317);
+  // The window observed with that page is saved too, so the next restart can
+  // tell whether it is still inside it (#17).
+  assert.deepEqual(saved.retention, { latestLedger: 4697317, oldestLedger: 4576358 });
 });
 
 test('empty pages are not yielded but still advance the cursor', async () => {
@@ -220,6 +223,98 @@ test('a cursor that fell out of retention restarts from oldestLedger', async () 
   assert.equal(client.requests[1].startLedger, 4576358);
   assert.equal(batch.events[0].ledger, 4576358);
   assert.match(logs.join('\n'), /outside the retention window/);
+});
+
+test('a restart whose saved position fell out of the window warns before fetching', async () => {
+  const cursors = new MemoryCursorStore();
+  await cursors.save('k', {
+    cursor: 'ancient',
+    ledger: 100,
+    updatedAt: '2026-10-01T00:00:00Z',
+    retention: { latestLedger: 4690000, oldestLedger: 50 },
+  });
+  const client = fakeClient([
+    new Error('start ledger is before the oldest ledger retained by this node'),
+    { events: [rawEvent(4576358, 0)], cursor: 'cur-fresh' },
+  ]);
+  const logs = [];
+  const poller = new EventPoller({ contractIds: [SAC] }, {
+    client, cursors, cursorKey: 'k', sleep: async () => {},
+    // Snapshot the request count at log time: "before any events are fetched"
+    // is the whole point of the warning, so it has to be assertable.
+    log: (m) => logs.push({ m, fetched: client.requests.length }),
+  });
+
+  const [batch] = await take(poller.stream(), 1);
+
+  const warning = logs.find((entry) => /retention window has moved past/.test(entry.m));
+  assert.ok(warning, 'expected a retention gap warning');
+  assert.equal(warning.fetched, 0, 'the warning must come before the first getEvents call');
+  assert.match(warning.m, /retains from ledger 4576358/);
+  assert.match(warning.m, /stopped at ledger 100/);
+  assert.match(warning.m, /advanced 4576308 ledgers since then/);
+  assert.match(warning.m, /4576258 ledger\(s\) of events in between are unrecoverable/);
+  // The warning is a warning, not a silent re-index: the saved cursor is still
+  // tried first and the existing recovery path does the restart.
+  assert.equal(client.requests[0].cursor, 'ancient');
+  assert.equal(batch.events[0].ledger, 4576358);
+});
+
+test('a restart still inside the window does not warn about a gap', async () => {
+  const cursors = new MemoryCursorStore();
+  await cursors.save('k', {
+    cursor: 'saved',
+    ledger: 4695317,
+    updatedAt: '',
+    retention: { latestLedger: 4697317, oldestLedger: 4500000 },
+  });
+  const client = fakeClient([{ events: [rawEvent(4695318, 0)], cursor: 'cur-2' }]);
+  const logs = [];
+  const poller = new EventPoller({ contractIds: [SAC] }, {
+    client, cursors, cursorKey: 'k', sleep: async () => {}, log: (m) => logs.push(m),
+  });
+  await take(poller.stream(), 1);
+  assert.doesNotMatch(logs.join('\n'), /retention window has moved past/);
+  assert.match(logs.join('\n'), /resuming from cursor saved/);
+});
+
+test('a cursor saved before snapshots existed is compared by ledger alone', async () => {
+  const cursors = new MemoryCursorStore();
+  await cursors.save('k', { cursor: 'ancient', ledger: 100, updatedAt: '' });
+  const client = fakeClient([{ events: [rawEvent(4576358, 0)], cursor: 'cur-1' }]);
+  const logs = [];
+  const poller = new EventPoller({ contractIds: [SAC] }, {
+    client, cursors, cursorKey: 'k', sleep: async () => {}, log: (m) => logs.push(m),
+  });
+  await take(poller.stream(), 1);
+  const text = logs.join('\n');
+  assert.match(text, /retention window has moved past/);
+  assert.doesNotMatch(text, /advanced .* ledgers since then/);
+});
+
+test('a failed retention check does not stop a warm restart', async () => {
+  const cursors = new MemoryCursorStore();
+  await cursors.save('k', { cursor: 'saved', ledger: 4695317, updatedAt: '' });
+  const client = {
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    requests: [],
+    async retention() { throw new Error('getHealth timed out'); },
+    async getEvents(args) {
+      this.requests.push(args);
+      return {
+        events: [rawEvent(4695318, 0)], cursor: 'cur-2',
+        latestLedger: 4697317, oldestLedger: 4576358,
+      };
+    },
+  };
+  const logs = [];
+  const poller = new EventPoller({ contractIds: [SAC] }, {
+    client, cursors, cursorKey: 'k', sleep: async () => {}, log: (m) => logs.push(m),
+  });
+  const [batch] = await take(poller.stream(), 1);
+  assert.equal(batch.events[0].ledger, 4695318);
+  assert.match(logs.join('\n'), /could not read the node's retention window/);
+  assert.equal(client.requests[0].cursor, 'saved');
 });
 
 test('errors that are not retention problems propagate', async () => {

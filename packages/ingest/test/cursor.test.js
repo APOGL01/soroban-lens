@@ -24,6 +24,44 @@ test('FileCursorStore persists across instances', async () => {
   assert.equal(reloaded.ledger, 4695317);
 });
 
+test('FileCursorStore round-trips the retention window saved with the position', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cursor-'));
+  const retention = { latestLedger: 4697317, oldestLedger: 4576358 };
+  await new FileCursorStore(dir).save('k', { ...state('abc', 4695317), retention });
+  const reloaded = await new FileCursorStore(dir).load('k');
+  assert.deepEqual(reloaded.retention, retention);
+});
+
+test('FileCursorStore drops a malformed retention snapshot instead of failing the resume', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cursor-'));
+  await writeFile(
+    join(dir, 'k.cursor.json'),
+    JSON.stringify({
+      cursor: 'abc',
+      ledger: 4695317,
+      updatedAt: '2026-10-01T00:00:00Z',
+      retention: { latestLedger: 'nope', oldestLedger: 5 },
+    }),
+  );
+  const loaded = await new FileCursorStore(dir).load('k');
+  assert.equal(loaded.cursor, 'abc');
+  assert.equal(loaded.retention, undefined, 'a corrupt snapshot costs the comparison, not the cursor');
+});
+
+// The window can only be trusted when it reads as a real range: oldest above
+// latest is the shape a truncated write leaves behind.
+test('FileCursorStore drops an inverted retention window', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lens-cursor-'));
+  await writeFile(
+    join(dir, 'k.cursor.json'),
+    JSON.stringify({
+      cursor: 'abc', ledger: 4695317, updatedAt: '',
+      retention: { latestLedger: 10, oldestLedger: 20 },
+    }),
+  );
+  assert.equal((await new FileCursorStore(dir).load('k')).retention, undefined);
+});
+
 test('FileCursorStore returns null for a missing key rather than throwing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'lens-cursor-'));
   assert.equal(await new FileCursorStore(dir).load('never-written'), null);
