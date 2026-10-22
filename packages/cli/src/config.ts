@@ -24,6 +24,15 @@ export interface LensConfig {
    * and the indexer's startup warn (#18). `LENS_CLOCK_SKEW_THRESHOLD_SECONDS`.
    */
   clockSkewThresholdSeconds: number;
+  /**
+   * Optional disk target for the database (`db.size` + its WAL), in bytes.
+   * When set, the indexer prunes oldest ledgers in chunks until the total
+   * fits, then checkpoints. Undefined disables size-based pruning.
+   * `LENS_MAX_DB_SIZE_BYTES`.
+   */
+  maxDbSizeBytes: number | undefined;
+  /** How often the indexer checks the size target, in milliseconds. `LENS_PRIUN_INTERVAL_MS`. */
+  pruneIntervalMs: number;
 }
 
 export interface ConfigOverrides {
@@ -40,6 +49,8 @@ export interface ConfigOverrides {
   retryAttempts?: number | undefined;
   retryBaseDelay?: number | undefined;
   retryMaxDelay?: number | undefined;
+  maxDbSize?: number | undefined;
+  pruneInterval?: number | undefined;
 }
 
 /**
@@ -76,6 +87,8 @@ export function resolveConfig(
     },
     fetchSpecs: !/^(0|false|no|off)$/i.test((env.LENS_FETCH_SPECS ?? '').trim()),
     clockSkewThresholdSeconds: resolveClockSkewThreshold(env.LENS_CLOCK_SKEW_THRESHOLD_SECONDS),
+    maxDbSizeBytes: overrides.maxDbSize ?? optionalNumber(env.LENS_MAX_DB_SIZE_BYTES),
+    pruneIntervalMs: overrides.pruneInterval ?? numberOr(env.LENS_PRUN_INTERVAL_MS, 60_000),
   };
 }
 
@@ -100,8 +113,8 @@ function optionalNumber(value: string | undefined): number | undefined {
  * Parse `Name: value` header pairs from flags and `LENS_RPC_HEADERS`.
  *
  * Malformed entries are skipped rather than thrown, because this runs on every
- * command including `lens doctor`, whose whole job is to report a bad
- * configuration rather than crash on one.
+ * command including `lens doctor`, whose whole job is to report a bad configuration
+ * rather than crash on one.
  */
 export function parseHeaders(
   flags: string[] | undefined,
